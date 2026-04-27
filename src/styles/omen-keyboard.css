@@ -1,0 +1,108 @@
+#lighting-keyboard .omen-keyboard {
+  position: relative;
+  display: inline-block;
+  background-color: transparent;
+  width: 2000px;
+}
+
+#lighting-keyboard .omen-keyboard {
+  --key-width: 50px;
+  --key-gap: 10px;
+  --start-offset: 35px;
+  --row-top: 30px;
+}
+
+#lighting-keyboard .small-key,
+#lighting-keyboard .key,
+#lighting-keyboard .wide-key {
+  position: absolute;
+  border-radius: 4px;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  color: #fff;
+  font-family: var(--font, system-ui, sans-serif);
+  font-weight: 600;
+  font-size: 11px;
+  padding: 2px;
+  word-wrap: break-word;
+  overflow: hidden;
+  user-select: none;
+  cursor: pointer;
+  border: 1px solid rgba(0, 0, 0, 0.4);
+  transition:
+    background-color 0.72s cubic-bezier(0.33, 1, 0.68, 1),
+    background 0.72s cubic-bezier(0.33, 1, 0.68, 1),
+    border-color 0.72s cubic-bezier(0.33, 1, 0.68, 1),
+    color 0.72s cubic-bezier(0.33, 1, 0.68, 1),
+    filter 0.2s ease,
+    box-shadow 0.2s ease,
+    outline-color 0.25s ease;
+}
+
+#lighting-keyboard .small-key:hover,
+#lighting-keyboard .key:hover,
+#lighting-keyboard .wide-key:hover {
+  filter: brightness(1.08);
+  z-index: 5;
+}
+
+#lighting-keyboard .small-key svg,
+#lighting-keyboard .key svg,
+#lighting-keyboard .wide-key svg {
+  fill: currentColor;
+  stroke: currentColor;
+  color: inherit;
+}
+
+#lighting-keyboard .small-key.long-text,
+#lighting-keyboard .key.long-text,
+#lighting-keyboard .wide-key.long-text {
+  font-size: 8px;
+}
+
+#lighting-keyboard .small-key[data-keycap="power"] {
+  font-size: 17px;
+  line-height: 1;
+}
+
+#lighting-keyboard .first-zone,
+#lighting-keyboard .second-zone,
+#lighting-keyboard .third-zone,
+#lighting-keyboard .fourth-zone {
+  background-color: #0a0a0a;
+  border-color: var(--kb-zone, rgba(255, 255, 255, 0.14));
+  color: var(--kb-zone, rgba(255, 255, 255, 0.32));
+  text-shadow: none;
+}
+
+#lighting-keyboard .first-zone.active,
+#lighting-keyboard .second-zone.active,
+#lighting-keyboard .third-zone.active,
+#lighting-keyboard .fourth-zone.active {
+  outline: 2px solid rgba(255, 255, 255, 0.85);
+  outline-offset: -1px;
+  box-shadow:
+    0 0 14px rgba(255, 255, 255, 0.28),
+    0 3px 10px rgba(0, 0, 0, 0.5);
+  z-index: 15;
+}
+
+#lighting-keyboard .omen-lkb-scaler {
+  transition: filter 0.55s cubic-bezier(0.33, 1, 0.68, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #lighting-keyboard .small-key,
+  #lighting-keyboard .key,
+  #lighting-keyboard .wide-key {
+    transition-duration: 0.08s;
+    transition-timing-function: ease;
+  }
+
+  #lighting-keyboard .omen-lkb-scaler {
+    transition-duration: 0.12s;
+  }
+}

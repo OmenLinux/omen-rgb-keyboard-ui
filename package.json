@@ -1,0 +1,62 @@
+{
+  "name": "omen-ui",
+  "version": "1.0.0",
+  "description": "OMEN Gaming Hub (Electron)",
+  "main": "electron/main.js",
+  "scripts": {
+    "postinstall": "node -e \"require('fs').existsSync('node_modules/electron/install.js')&&require('child_process').execSync('node node_modules/electron/install.js',{stdio:'inherit'})\"",
+    "fix:electron": "node node_modules/electron/install.js",
+    "dev": "cross-env NODE_ENV=development concurrently -k \"vite\" \"wait-on -t 120000 tcp:127.0.0.1:5173 && electron .\"",
+    "build:renderer": "vite build",
+    "start": "electron .",
+    "pack": "npm run build:renderer && electron-builder --dir",
+    "build:win": "npm run build:renderer && electron-builder --win",
+    "build:linux": "npm run build:renderer && electron-builder --linux"
+  },
+  "dependencies": {
+    "@fontsource/oxanium": "^5.2.8",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.3",
+    "concurrently": "^9.1.0",
+    "cross-env": "^7.0.3",
+    "electron": "^33.2.1",
+    "electron-builder": "^25.1.8",
+    "typescript": "~5.6.3",
+    "vite": "^5.4.11",
+    "wait-on": "^8.0.1"
+  },
+  "build": {
+    "appId": "com.omen.ui",
+    "productName": "OMEN Gaming Hub",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "electron/**/*",
+      "dist/renderer/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Utility"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  }
+}
