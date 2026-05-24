@@ -39,11 +39,21 @@ jobs:
       - name: Build Windows installers
         run: npm run build:win
 
+      - name: Stage Windows installers
+        shell: bash
+        run: |
+          mkdir -p release-installers
+          shopt -s nullglob
+          for f in dist/*.exe; do
+            cp "$f" release-installers/
+          done
+          ls -la release-installers/
+
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
         with:
           name: windows-dist
-          path: dist/
+          path: release-installers/
           if-no-files-found: error
 
   build-linux:
@@ -76,11 +86,18 @@ jobs:
       - name: Build Linux packages
         run: npm run build:linux
 
+      - name: Stage Linux packages
+        run: |
+          mkdir -p release-installers
+          shopt -s nullglob
+          cp dist/*.AppImage dist/*.deb release-installers/
+          ls -la release-installers/
+
       - name: Upload Linux artifacts
         uses: actions/upload-artifact@v4
         with:
           name: linux-dist
-          path: dist/
+          path: release-installers/
           if-no-files-found: error
 
   release:
@@ -119,6 +136,8 @@ jobs:
           tag_name: ${{ steps.meta.outputs.tag }}
           name: ${{ steps.meta.outputs.name }}
           generate_release_notes: true
-          files: release-assets/**/*
+          files: |
+            release-assets/windows/*
+            release-assets/linux/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
