@@ -1,0 +1,124 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --legacy-peer-deps
+
+      - name: Set build version
+        shell: bash
+        run: |
+          BASE_VERSION=$(node -p "require('./package.json').version")
+          BUILD_VERSION="${BASE_VERSION}+${GITHUB_SHA::7}"
+          npm version "$BUILD_VERSION" --no-git-tag-version --allow-same-version
+          echo "BUILD_VERSION=$BUILD_VERSION" >> "$GITHUB_ENV"
+
+      - name: Build Windows installers
+        run: npm run build:win
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-dist
+          path: dist/
+          if-no-files-found: error
+
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install Linux packaging dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rpm
+
+      - name: Install dependencies
+        run: npm ci --legacy-peer-deps
+
+      - name: Set build version
+        run: |
+          BASE_VERSION=$(node -p "require('./package.json').version")
+          BUILD_VERSION="${BASE_VERSION}+${GITHUB_SHA::7}"
+          npm version "$BUILD_VERSION" --no-git-tag-version --allow-same-version
+          echo "BUILD_VERSION=$BUILD_VERSION" >> "$GITHUB_ENV"
+
+      - name: Build Linux packages
+        run: npm run build:linux
+
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-dist
+          path: dist/
+          if-no-files-found: error
+
+  release:
+    needs:
+      - build-windows
+      - build-linux
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download Windows artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-dist
+          path: release-assets/windows
+
+      - name: Download Linux artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-dist
+          path: release-assets/linux
+
+      - name: Prepare release tag
+        id: meta
+        run: |
+          BASE_VERSION=$(node -p "require('./package.json').version")
+          SHORT_SHA="${GITHUB_SHA::7}"
+          TAG="v${BASE_VERSION}-${SHORT_SHA}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "name=OMEN Gaming Hub ${BASE_VERSION} (${SHORT_SHA})" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: ${{ steps.meta.outputs.name }}
+          generate_release_notes: true
+          files: release-assets/**/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
