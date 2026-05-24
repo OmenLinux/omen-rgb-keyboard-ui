@@ -2,6 +2,12 @@
   "name": "omen-ui",
   "version": "1.0.0",
   "description": "OMEN Gaming Hub (Electron)",
+  "author": "OmenLinux <noreply@github.com>",
+  "homepage": "https://github.com/OmenLinux/omen-rgb-keyboard-ui",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/OmenLinux/omen-rgb-keyboard-ui.git"
+  },
   "main": "electron/main.js",
   "scripts": {
     "postinstall": "node -e \"require('fs').existsSync('node_modules/electron/install.js')&&require('child_process').execSync('node node_modules/electron/install.js',{stdio:'inherit'})\"",
@@ -10,8 +16,8 @@
     "build:renderer": "vite build",
     "start": "electron .",
     "pack": "npm run build:renderer && electron-builder --dir",
-    "build:win": "npm run build:renderer && electron-builder --win",
-    "build:linux": "npm run build:renderer && electron-builder --linux"
+    "build:win": "npm run build:renderer && electron-builder --win --publish never",
+    "build:linux": "npm run build:renderer && electron-builder --linux --publish never"
   },
   "dependencies": {
     "@fontsource/oxanium": "^5.2.8",
@@ -52,7 +58,8 @@
         "AppImage",
         "deb"
       ],
-      "category": "Utility"
+      "category": "Utility",
+      "maintainer": "OmenLinux <noreply@github.com>"
     },
     "nsis": {
       "oneClick": false,
