@@ -112,6 +112,16 @@ async function writeAllZonesToDriver(
   return null;
 }
 
+async function writeAnimationSpeedOnly(api: OmenDriverApi, speed: number): Promise<string | null> {
+  const s = await api.sysfsWrite("animation_speed", String(speed));
+  return s.ok ? null : s.error ?? "Could not set speed.";
+}
+
+async function writeBrightnessOnly(api: OmenDriverApi, brightness: number): Promise<string | null> {
+  const br = await api.sysfsWrite("brightness", String(brightness));
+  return br.ok ? null : br.error ?? "Could not set brightness.";
+}
+
 async function syncLightingToDriver(
   api: OmenDriverApi,
   mode: LightingAnimUi,
@@ -149,6 +159,7 @@ export function LightingSection({ isActive }: Props) {
   const [keyboardHydrated, setKeyboardHydrated] = useState(false);
   const brightnessBeforeOff = useRef(100);
   const prevAnimForDriver = useRef<LightingAnimUi | null>(null);
+  const driverMirrorRef = useRef<{ mode: LightingAnimUi; speed: number; brightness: number } | null>(null);
   const sysfsPullInFlightRef = useRef(false);
   const zoneColorsRef = useRef(zoneColors);
   zoneColorsRef.current = zoneColors;
@@ -178,7 +189,9 @@ export function LightingSection({ isActive }: Props) {
       const br = parseSysfsBrightness(brR.ok ? brR.value : undefined);
       const speed = parseSysfsAnimSpeed(speedR.ok ? speedR.value : undefined);
       const mode = sysfsToUiAnimMode(modeR.ok ? modeR.value : undefined, br);
+      const effBr = mode === "off" ? 0 : br;
       prevAnimForDriver.current = mode;
+      driverMirrorRef.current = { mode, speed, brightness: effBr };
       startTransition(() => {
         setZoneColors(zones);
         setAnimMode(mode);
@@ -189,10 +202,10 @@ export function LightingSection({ isActive }: Props) {
           setBrightness(br);
           if (br > 0) brightnessBeforeOff.current = br;
         }
+        setKeyboardHydrated(true);
       });
     } finally {
       sysfsPullInFlightRef.current = false;
-      setKeyboardHydrated(true);
     }
   }, [api, status?.sysfsReady]);
 
@@ -315,25 +328,56 @@ export function LightingSection({ isActive }: Props) {
   }, [animMode]);
 
   useEffect(() => {
-    if (!keyboardHydrated) return;
+    if (!keyboardHydrated || !isActive) return;
     if (!api) return;
     if (!canWrite) {
       setAnimHint(null);
       return;
     }
+    const effBr = animMode === "off" ? 0 : brightness;
+    const mirror = driverMirrorRef.current;
+    if (
+      mirror &&
+      mirror.mode === animMode &&
+      mirror.speed === animSpeed &&
+      mirror.brightness === effBr
+    ) {
+      return;
+    }
     const t = window.setTimeout(() => {
       void (async () => {
-        const err = await syncLightingToDriver(api, animMode, animSpeed, brightness);
+        const onlySpeed =
+          mirror &&
+          mirror.mode === animMode &&
+          mirror.brightness === effBr &&
+          mirror.speed !== animSpeed &&
+          animMode !== "off" &&
+          animMode !== "static";
+        const onlyBrightness =
+          mirror &&
+          mirror.mode === animMode &&
+          mirror.speed === animSpeed &&
+          mirror.brightness !== effBr &&
+          animMode !== "off";
+
+        const err = onlySpeed
+          ? await writeAnimationSpeedOnly(api, animSpeed)
+          : onlyBrightness
+            ? await writeBrightnessOnly(api, brightness)
+            : await syncLightingToDriver(api, animMode, animSpeed, brightness);
         if (err) setAnimHint(err);
         else {
           setAnimHint(null);
-          void refresh();
-          window.setTimeout(() => void applyLightingFromSysfs(), 100);
+          driverMirrorRef.current = { mode: animMode, speed: animSpeed, brightness: effBr };
+          if (!onlySpeed && !onlyBrightness) {
+            void refresh();
+            window.setTimeout(() => void applyLightingFromSysfs(), 100);
+          }
         }
       })();
     }, 160);
     return () => clearTimeout(t);
-  }, [animMode, animSpeed, brightness, canWrite, api, refresh, keyboardHydrated, applyLightingFromSysfs]);
+  }, [isActive, animMode, animSpeed, brightness, canWrite, api, refresh, keyboardHydrated, applyLightingFromSysfs]);
 
   const setAnimModeUi = useCallback((next: LightingAnimUi, brightnessOverride?: number) => {
     if (next === "off" && animMode !== "off") {
@@ -361,6 +405,11 @@ export function LightingSection({ isActive }: Props) {
       }
     }
     setAnimHint(null);
+    driverMirrorRef.current = {
+      mode: animMode,
+      speed: animSpeed,
+      brightness: animMode === "off" ? 0 : brightness,
+    };
     void refresh();
     window.setTimeout(() => void applyLightingFromSysfs(), 120);
   }, [api, canWrite, animMode, animSpeed, brightness, zoneColors, refresh, applyLightingFromSysfs]);
@@ -400,6 +449,7 @@ export function LightingSection({ isActive }: Props) {
         }
         const zoneErr = await writeAllZonesToDriver(api, defaults);
         if (zoneErr) setAnimHint(zoneErr);
+        else driverMirrorRef.current = { mode: "static", speed: 5, brightness: 100 };
         void refresh();
         window.setTimeout(() => void applyLightingFromSysfs(), 120);
       })();
