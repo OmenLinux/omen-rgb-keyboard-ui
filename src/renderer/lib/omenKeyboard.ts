@@ -186,8 +186,7 @@ export function scaleOmenKeyboard(): void {
   const root = document.getElementById("lighting-keyboard");
   const scaler = root?.querySelector<HTMLElement>(".omen-lkb-scaler");
   const kbEl = root?.querySelector<HTMLElement>(".omen-keyboard");
-  const stage = document.querySelector<HTMLElement>(".keyboard-stage--omen-lkb");
-  if (!root || !scaler || !kbEl || !stage) return;
+  if (!root || !scaler || !kbEl) return;
 
   const keyboardWidth = kbEl.offsetWidth || kbEl.scrollWidth;
   const keyboardHeight = kbEl.offsetHeight || kbEl.scrollHeight;
@@ -195,9 +194,10 @@ export function scaleOmenKeyboard(): void {
     return;
   }
 
-  const pad = 24;
-  const availableWidth = Math.max(1, stage.clientWidth - pad);
-  const availableHeight = Math.max(1, stage.clientHeight - pad);
+  /* Fit to the keyboard viewport, not the whole stage (color bar sits below). */
+  const pad = 12;
+  const availableWidth = Math.max(1, root.clientWidth - pad);
+  const availableHeight = Math.max(1, root.clientHeight - pad);
   const scaleX = availableWidth / keyboardWidth;
   const scaleY = availableHeight / keyboardHeight;
   const scale = Math.min(scaleX, scaleY, 1);
@@ -227,11 +227,11 @@ export function initOmenLightingKeyboard(): () => void {
   setTimeout(runScale, 80);
   window.addEventListener("resize", onResize);
 
-  const stage = document.querySelector<HTMLElement>(".keyboard-stage--omen-lkb");
+  const root = document.getElementById("lighting-keyboard");
   let ro: ResizeObserver | null = null;
-  if (stage && typeof ResizeObserver !== "undefined") {
+  if (root && typeof ResizeObserver !== "undefined") {
     ro = new ResizeObserver(() => scaleOmenKeyboard());
-    ro.observe(stage);
+    ro.observe(root);
   }
 
   return () => {

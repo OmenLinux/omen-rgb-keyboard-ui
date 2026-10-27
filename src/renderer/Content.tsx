@@ -1,10 +1,26 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { SystemVitals, ViewId } from "./types";
+import { AboutSection } from "./components/AboutSection";
 import { LightingSection } from "./components/LightingSection";
 import { FanControlSection } from "./components/FanControlSection";
+import { GraphicsSection } from "./components/GraphicsSection";
+import { useDriver } from "./driverContext";
+import { FAN_CHANGED, notifyFanChanged } from "./fanEvents";
 import { fillHeat, formatTempMaybeC, meterClass, tempHeatMaybeC, utilHeat } from "./heatScale";
 
-type Props = { activeView: ViewId };
+const POWER_TO_THERMAL = {
+  eco: "silent",
+  balanced: "normal",
+  performance: "performance",
+} as const;
+
+const THERMAL_TO_POWER: Record<string, "eco" | "balanced" | "performance"> = {
+  silent: "eco",
+  normal: "balanced",
+  performance: "performance",
+};
+
+type Props = { activeView: ViewId; onNavigate: (id: ViewId) => void };
 
 const VITALS_FALLBACK: SystemVitals = {
   cpuTempC: null,
@@ -27,28 +43,6 @@ const VITALS_FALLBACK: SystemVitals = {
   networkByProcess: [],
 };
 
-function padSeries(series: number[], minLen: number): number[] {
-  if (series.length >= minLen) return series;
-  if (series.length === 0) return Array.from({ length: minLen }, () => 0);
-  const first = series[0];
-  return [...Array.from({ length: minLen - series.length }, () => first), ...series];
-}
-
-function polylinePoints(vals: number[], yMin: number, yMax: number, w = 640, h = 220): string {
-  const v = padSeries(vals, Math.max(2, vals.length));
-  const lo = yMax > yMin ? yMin : Math.min(...v);
-  const hi = yMax > yMin ? yMax : Math.max(...v, lo + 1e-6);
-  const span = hi - lo || 1;
-  return v
-    .map((p, i) => {
-      const x = v.length === 1 ? w / 2 : (i / (v.length - 1)) * w;
-      const t = (p - lo) / span;
-      const y = h - 8 - Math.min(1, Math.max(0, t)) * (h - 16);
-      return `${Math.round(x)},${Math.round(y)}`;
-    })
-    .join(" ");
-}
-
 function procInitial(name: string): string {
   const t = name.trim();
   if (!t) return "?";
@@ -56,26 +50,13 @@ function procInitial(name: string): string {
   return /[a-z]/i.test(ch) ? ch.toUpperCase() : ch;
 }
 
-function formatKbps(kbps: number): string {
-  if (!Number.isFinite(kbps) || kbps <= 0) return "0 kbps";
-  if (kbps >= 1000) return `${(kbps / 1000).toFixed(2)} Mbps`;
-  if (kbps < 0.1) return "<0.1 kbps";
-  return `${kbps.toFixed(1)} kbps`;
-}
-
-export function Content({ activeView }: Props) {
+export function Content({ activeView, onNavigate }: Props) {
+  const { status } = useDriver();
   const [sys, setSys] = useState<SystemVitals | null>(null);
-  const [cpuHist, setCpuHist] = useState<number[]>([]);
-  const [gpuHist, setGpuHist] = useState<number[]>([]);
-  const [freqHist, setFreqHist] = useState<number[]>([]);
+  const [gfxMode, setGfxMode] = useState<string | null>(null);
 
-  const [modeChip, setModeChip] = useState(0);
   const [tempC, setTempC] = useState(true);
   const [power, setPower] = useState<"eco" | "balanced" | "performance">("balanced");
-  const [nbMode, setNbMode] = useState<"off" | "auto" | "custom">("off");
-  const [uvOn, setUvOn] = useState(false);
-  const [netBoost, setNetBoost] = useState(false);
-  const [nbQuery, setNbQuery] = useState("");
   const [hubToast, setHubToast] = useState<string | null>(null);
 
   const toast = useCallback((t: string) => {
@@ -103,55 +84,57 @@ export function Content({ activeView }: Props) {
     };
   }, []);
 
-  useEffect(() => {
-    if (!sys) return;
-    if (sys.cpuTempC != null) setCpuHist((h) => [...h.slice(-47), sys.cpuTempC as number]);
-    if (sys.gpuTempC != null) setGpuHist((h) => [...h.slice(-47), sys.gpuTempC as number]);
-    if (sys.cpuSpeedGhz != null) setFreqHist((h) => [...h.slice(-47), sys.cpuSpeedGhz as number]);
-  }, [sys]);
-
   const m = sys ?? VITALS_FALLBACK;
 
-  const chartCpuPts = useMemo(
-    () => (cpuHist.length ? polylinePoints(cpuHist, 35, 100) : "0,110 640,110"),
-    [cpuHist],
-  );
-  const chartGpuPts = useMemo(
-    () => (gpuHist.length ? polylinePoints(gpuHist, 35, 100) : "0,110 640,110"),
-    [gpuHist],
-  );
-  const chartFreqPts = useMemo(
-    () => (freqHist.length ? polylinePoints(freqHist, 0.4, 5.2) : "0,110 640,110"),
-    [freqHist],
-  );
-
-  const avgCpuTempStr =
-    cpuHist.length > 0
-      ? `${Math.round(cpuHist.reduce((a, b) => a + b, 0) / cpuHist.length)}°C`
-      : "N/A";
-  const avgCpuFreqStr =
-    freqHist.length > 0
-      ? `${(freqHist.reduce((a, b) => a + b, 0) / freqHist.length).toFixed(2)} GHz`
-      : "N/A";
-
-  const netTotalMbps =
-    m.netDownMbps != null && m.netUpMbps != null ? m.netDownMbps + m.netUpMbps : null;
-
-  const netProcs = m.networkByProcess ?? [];
-  const filteredNetProcs = useMemo(() => {
-    const q = nbQuery.trim().toLowerCase();
-    if (!q) return netProcs;
-    return netProcs.filter((r) => r.name.toLowerCase().includes(q) || String(r.pid).includes(q));
-  }, [netProcs, nbQuery]);
-
-  const nbRingCirc = 2 * Math.PI * 88;
-  const nbRingDash =
-    netTotalMbps != null && netTotalMbps > 0
-      ? Math.min(nbRingCirc * 0.92, 16 + (netTotalMbps / 250) * nbRingCirc * 0.85)
-      : 12;
-
   const powerSummaryLabel =
-    power === "eco" ? "ECO" : power === "balanced" ? "Balanced" : "Performance";
+    power === "eco" ? "Quiet" : power === "balanced" ? "Balanced" : "Performance";
+
+  const lightingSummary =
+    status?.platform !== "linux"
+      ? "Preview"
+      : status.sysfsReady
+        ? status.sysfsWritable
+          ? "Ready"
+          : "Needs permission"
+        : "Not installed";
+
+  useEffect(() => {
+    const api = window.omenDriver?.optimusGetStatus ?? window.omenOptimus?.getStatus;
+    if (!api) return;
+    let alive = true;
+    void api().then((s) => {
+      if (!alive) return;
+      if (!s?.installed) {
+        setGfxMode(null);
+        return;
+      }
+      const mode = s.currentMode;
+      setGfxMode(
+        mode === "nvidia" ? "NVIDIA" : mode === "integrated" ? "Integrated" : mode === "hybrid" ? "Hybrid" : "—",
+      );
+    });
+    return () => {
+      alive = false;
+    };
+  }, [activeView, status?.sysfsReady]);
+
+  useEffect(() => {
+    const read = window.omenDriver?.sysfsRead;
+    if (!read || status?.fanSysfsReady !== true) return;
+    let alive = true;
+    const pull = async () => {
+      const r = await read("fan/thermal_profile");
+      if (!alive || !r.ok || !r.value) return;
+      const mapped = THERMAL_TO_POWER[r.value.trim()];
+      if (mapped) setPower(mapped);
+    };
+    void pull();
+    window.addEventListener(FAN_CHANGED, pull);
+    return () => {
+      alive = false;
+      window.removeEventListener(FAN_CHANGED, pull);
+    };
+  }, [status?.fanSysfsReady]);
 
   const v = (id: ViewId) => activeView === id;
 
@@ -159,39 +142,6 @@ export function Content({ activeView }: Props) {
     <div className="main-scroll">
       <section className={`view${v("vitals") ? " is-active" : ""}`} id="view-vitals" data-view="vitals" role="tabpanel">
         <div className="vitals-toolbar">
-          <div className="vitals-modes">
-            {[0, 1, 2].map((i) => (
-              <button
-                key={i}
-                type="button"
-                className={`mode-chip${modeChip === i ? " is-active" : ""}`}
-                aria-label={i === 0 ? "Dashboard mode" : i === 1 ? "Fan mode" : "Info"}
-                onClick={() => {
-                  setModeChip(i);
-                  toast(i === 0 ? "Dashboard layout" : i === 1 ? "Fan view" : "Info mode");
-                }}
-              >
-                {i === 0 && (
-                  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-                    <circle cx="12" cy="12" r="10" />
-                    <path d="M12 6v6l4 2" />
-                  </svg>
-                )}
-                {i === 1 && (
-                  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-                    <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4" />
-                    <circle cx="12" cy="12" r="3" />
-                  </svg>
-                )}
-                {i === 2 && (
-                  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-                    <circle cx="12" cy="12" r="10" />
-                    <path d="M12 16v-4M12 8h.01" />
-                  </svg>
-                )}
-              </button>
-            ))}
-          </div>
           <div className="temp-unit">
             <span className="temp-unit__label" data-temp-side="f">
               °F
@@ -295,19 +245,43 @@ export function Content({ activeView }: Props) {
             <div className="wide-card__sub">{m.storageSubtitle}</div>
           </div>
 
-          <div className="card settings-card vitals-settings">
-            <h2 className="panel-head__title settings-card__heading">Your settings</h2>
-            <div className="settings-row">
-              <div className="setting-tile setting-tile--orange">
-                <span className="setting-tile__lbl">Performance Control</span>
-                <span className="setting-tile__val">{powerSummaryLabel}</span>
-              </div>
-              <div className="setting-tile setting-tile--pink">
-                <span className="setting-tile__lbl">Undervolting</span>
-                <span className="setting-tile__val">{uvOn ? "On" : "Off"}</span>
-              </div>
-              <div className="settings-volt">Core Voltage Offset 0.000V</div>
-            </div>
+          <div className="card status-card vitals-settings">
+            <div className="wide-card__title">AT A GLANCE</div>
+            <ul className="status-list">
+              <li>
+                <button type="button" className="status-list__row" onClick={() => onNavigate("performance")}>
+                  <span className="status-list__lbl">Power</span>
+                  <span className="status-list__val">
+                    {powerSummaryLabel}
+                    <span className="status-list__go" aria-hidden>
+                      →
+                    </span>
+                  </span>
+                </button>
+              </li>
+              <li>
+                <button type="button" className="status-list__row" onClick={() => onNavigate("lighting")}>
+                  <span className="status-list__lbl">Keyboard</span>
+                  <span className="status-list__val">
+                    {lightingSummary}
+                    <span className="status-list__go" aria-hidden>
+                      →
+                    </span>
+                  </span>
+                </button>
+              </li>
+              <li>
+                <button type="button" className="status-list__row" onClick={() => onNavigate("graphics")}>
+                  <span className="status-list__lbl">Graphics</span>
+                  <span className="status-list__val">
+                    {gfxMode ?? "Open"}
+                    <span className="status-list__go" aria-hidden>
+                      →
+                    </span>
+                  </span>
+                </button>
+              </li>
+            </ul>
           </div>
 
           <div className="card net-mini vitals-net">
@@ -321,22 +295,6 @@ export function Content({ activeView }: Props) {
                 <span className="net-big">{m.netDownMbps != null ? m.netDownMbps.toFixed(1) : "—"}</span>{" "}
                 <span className="net-unit">Download Speed Mbps</span>
               </div>
-            </div>
-            <div className="net-mini__toggle">
-              <span>Network Booster</span>
-              <button
-                type="button"
-                className="tag tag--orange tag--btn"
-                onClick={() => {
-                  setNetBoost((x) => {
-                    const next = !x;
-                    toast(next ? "Network Booster on" : "Network Booster off");
-                    return next;
-                  });
-                }}
-              >
-                {netBoost ? "ON" : "OFF"}
-              </button>
             </div>
           </div>
 
@@ -394,23 +352,31 @@ export function Content({ activeView }: Props) {
 
       <section className={`view${v("performance") ? " is-active" : ""}`} id="view-performance" data-view="performance" role="tabpanel">
         <div className="panel-head">
-          <h2 className="panel-head__title">
-            Power Mode{" "}
-            <button type="button" className="info-dot" aria-label="Info">
-              i
-            </button>
-          </h2>
-          <button type="button" className="linkish" onClick={() => toast("Auto Power Mode settings")}>
-            Auto Power Mode Settings
-          </button>
+          <h2 className="panel-head__title">Power mode</h2>
+          <p className="panel-head__lead">Tap one. That’s it.</p>
         </div>
         <div className="power-row">
           <div className="power-cards">
             {(
               [
-                { id: "eco" as const, label: "ECO", icon: "leaf" },
-                { id: "balanced" as const, label: "Balanced", icon: "diamond" },
-                { id: "performance" as const, label: "Performance", icon: "bars" },
+                {
+                  id: "eco" as const,
+                  label: "Quiet",
+                  blurb: "Cooler & quieter",
+                  icon: "leaf",
+                },
+                {
+                  id: "balanced" as const,
+                  label: "Balanced",
+                  blurb: "Everyday use",
+                  icon: "diamond",
+                },
+                {
+                  id: "performance" as const,
+                  label: "Performance",
+                  blurb: "Max speed",
+                  icon: "bars",
+                },
               ] as const
             ).map((p) => (
               <button
@@ -419,7 +385,21 @@ export function Content({ activeView }: Props) {
                 className={`power-card power-card--${p.id}${power === p.id ? " is-active" : ""}`}
                 onClick={() => {
                   setPower(p.id);
-                  toast(`Power mode: ${p.label}`);
+                  const write = window.omenDriver?.sysfsWrite;
+                  if (!write || status?.fanSysfsWritable !== true) {
+                    toast(p.label);
+                    return;
+                  }
+                  void (async () => {
+                    const profile = await write("fan/thermal_profile", POWER_TO_THERMAL[p.id]);
+                    if (!profile.ok) {
+                      toast("Couldn't change power mode.");
+                      return;
+                    }
+                    await write("fan/power_limits", "default");
+                    toast(`${p.label} mode`);
+                    notifyFanChanged();
+                  })();
                 }}
               >
                 <span className="power-card__ico" aria-hidden>
@@ -440,32 +420,29 @@ export function Content({ activeView }: Props) {
                     </svg>
                   )}
                 </span>
-                <span>{p.label}</span>
+                <span className="power-card__label">{p.label}</span>
+                <span className="power-card__blurb">{p.blurb}</span>
               </button>
             ))}
-          </div>
-          <div className="power-brand">
-            <span className="power-brand__mark" />
-            <span className="power-brand__txt">
-              Optimized with <strong>OMEN Dynamic Power</strong>
-            </span>
           </div>
         </div>
 
         <div className="panel-head panel-head--spaced">
-          <h2 className="panel-head__title">
-            Thermal Control{" "}
-            <button type="button" className="info-dot" aria-label="Info">
-              i
-            </button>
-          </h2>
+          <h2 className="panel-head__title">Fans</h2>
+          <p className="panel-head__lead">See speeds and temps. Flip a switch if you want more airflow.</p>
         </div>
         <div className="thermal-block" data-thermal="auto">
-          <FanControlSection onToast={toast} embedded />
+          <FanControlSection
+            onToast={toast}
+            embedded
+            cpuTempC={m.cpuTempC}
+            gpuTempC={m.gpuTempC}
+            useCelsius={tempC}
+          />
         </div>
 
         <div className="panel-head">
-          <h2 className="panel-head__title">System Temperature</h2>
+          <h2 className="panel-head__title">Temperatures</h2>
         </div>
         <div className="temp-strip">
           <div>
@@ -487,263 +464,11 @@ export function Content({ activeView }: Props) {
         </div>
       </section>
 
-      <section className={`view${v("undervolt") ? " is-active" : ""}`} id="view-undervolt" data-view="undervolt" role="tabpanel">
-        <div className="uv-head">
-          <h2 className="uv-title">Undervolting</h2>
-          <button type="button" className="linkish">
-            What is Undervolting?
-          </button>
-        </div>
-        <div className="uv-panel">
-          <div className="uv-row">
-            <span className="uv-offon">
-              <span className="muted">Off</span>{" "}
-              <button
-                type="button"
-                className="switch"
-                aria-pressed={uvOn}
-                onClick={() => setUvOn((x) => !x)}
-              >
-                <span className="switch__knob" />
-              </button>{" "}
-              <span className="muted">On</span>
-            </span>
-            <div className="uv-preset">
-              <button type="button" className="icon-sq" aria-label="Previous">
-                ‹
-              </button>
-              <span>Default</span>
-              <button type="button" className="icon-sq" aria-label="Next">
-                ›
-              </button>
-            </div>
-          </div>
-          <div className={`uv-slider-wrap${uvOn ? "" : " is-disabled"}`}>
-            <label className="uv-slider-label">Core Voltage Offset</label>
-            <div className="uv-slider-track">
-              <div className="uv-slider-fill" style={{ width: "0%" }} />
-              <div className="uv-slider-thumb" style={{ left: "0%" }} />
-            </div>
-            <div className="uv-slider-ticks">
-              <span>0v</span>
-              <span>-0.2v</span>
-            </div>
-          </div>
-          <div className="uv-actions">
-            <button type="button" className="btn-ghost" disabled>
-              CANCEL
-            </button>
-            <button type="button" className="btn-ghost" disabled>
-              APPLY
-            </button>
-          </div>
-        </div>
-
-        <div className="panel-head panel-head--spaced">
-          <h2 className="panel-head__title">Voltage / Temperature Status</h2>
-          <button type="button" className="mini-dd">
-            1 min ▾
-          </button>
-        </div>
-        <div className="chart-card">
-          <svg className="chart-svg" viewBox="0 0 640 220" preserveAspectRatio="none">
-            <defs>
-              <linearGradient id="grid" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stopColor="#2a2a2a" />
-                <stop offset="100%" stopColor="#1a1a1a" />
-              </linearGradient>
-            </defs>
-            <rect width="640" height="220" fill="url(#grid)" />
-            <g stroke="#333" strokeWidth="1">
-              <path d="M0 44H640M0 88H640M0 132H640M0 176H640" />
-            </g>
-            <polyline className="chart-line chart-line--purple" points={chartCpuPts} />
-            <polyline className="chart-line chart-line--blue" points={chartFreqPts} />
-            <polyline className="chart-line chart-line--red" points={chartGpuPts} />
-          </svg>
-          <div className="chart-legend">
-            <div>
-              <span className="sq sq--purple" /> CPU Temp{" "}
-              <strong className={`temp-g ${meterClass(tempHeatMaybeC(m.cpuTempC))}`}>
-                {formatTempMaybeC(m.cpuTempC, tempC)}
-              </strong>
-            </div>
-            <div>
-              <span className="sq sq--blue" /> CPU Speed{" "}
-              <strong>{m.cpuSpeedGhz != null ? `${m.cpuSpeedGhz} GHz` : "—"}</strong>
-            </div>
-            <div>
-              <span className="sq sq--red" /> CPU Voltage <strong>N/A</strong>
-            </div>
-          </div>
-        </div>
-
-        <div className="panel-head">
-          <h2 className="panel-head__title">Test Result</h2>
-        </div>
-        <div className="test-card">
-          <button type="button" className="btn-ghost" onClick={() => toast("Undervolt test not wired to hardware")}>
-            Run test
-          </button>
-          <table className="test-table">
-            <tbody>
-              {[
-                ["Core Voltage Offset", "N/A"],
-                ["Avg. CPU Temp", avgCpuTempStr],
-                ["Avg. CPU Freq", avgCpuFreqStr],
-                ["Avg. Core Voltage", "N/A"],
-              ].map(([a, b]) => (
-                <tr key={a}>
-                  <td>{a}</td>
-                  <td>{b}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-        <p className="uv-warn">Altering the CPU core voltage may cause system instability. Please use at your own risk!</p>
-      </section>
-
       <LightingSection isActive={v("lighting")} />
 
-      <section className={`view view--center${v("graphics") ? " is-active" : ""}`} id="view-graphics" data-view="graphics" role="tabpanel">
-        <h2 className="gfx-title">Select a GPU mode</h2>
-        <button type="button" className="gfx-card">
-          <span className="gfx-card__ico">
-            <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.2">
-              <rect x="3" y="3" width="7" height="7" />
-              <rect x="14" y="3" width="7" height="7" />
-              <rect x="14" y="14" width="7" height="7" />
-              <rect x="3" y="14" width="7" height="7" />
-            </svg>
-          </span>
-          <span>Advanced Optimus</span>
-        </button>
-        <p className="gfx-desc">Use NVIDIA Advanced Optimus technology for optimized graphics modes.</p>
-        <button type="button" className="gfx-cta">
-          OPEN NVIDIA ADVANCED OPTIMUS
-        </button>
-      </section>
+      {v("graphics") ? <GraphicsSection isActive onToast={toast} /> : null}
 
-      <section className={`view${v("network") ? " is-active" : ""}`} id="view-network" data-view="network" role="tabpanel">
-        <div className="nb-head">
-          <div className="nb-mode">
-            <span className="nb-mode__lbl">Mode</span>
-            <div className="seg-3 seg-3--light" role="group" aria-label="Network booster mode">
-              {(["off", "auto", "custom"] as const).map((m) => (
-                <button key={m} type="button" className={nbMode === m ? "is-on" : ""} onClick={() => setNbMode(m)}>
-                  {m.toUpperCase()}
-                </button>
-              ))}
-            </div>
-          </div>
-          <p className="nb-desc">
-            Live totals from all interfaces; per-app rates use Linux TCP counters on established connections that
-            report an owning process (same source as{" "}
-            <code className="nb-code">ss -tiapn</code>).
-          </p>
-          <div className="nb-search">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <circle cx="11" cy="11" r="8" />
-              <path d="m21 21-4.3-4.3" />
-            </svg>
-            <input
-              type="search"
-              placeholder="Filter by app or PID"
-              aria-label="Filter applications"
-              value={nbQuery}
-              onChange={(e) => setNbQuery(e.target.value)}
-            />
-          </div>
-        </div>
-        <div className="nb-grid">
-          <div className="nb-gauge-card">
-            <div className="wide-card__title">Total Bandwidth Usage</div>
-            <div className="nb-gauge">
-              <svg viewBox="0 0 200 200">
-                <circle cx="100" cy="100" r="88" fill="none" stroke="#2a2a2a" strokeWidth="10" />
-                <circle
-                  cx="100"
-                  cy="100"
-                  r="88"
-                  fill="none"
-                  stroke="url(#omenRingGrad)"
-                  strokeWidth="10"
-                  strokeDasharray={`${nbRingDash} ${nbRingCirc}`}
-                  strokeLinecap="round"
-                  transform="rotate(-90 100 100)"
-                />
-              </svg>
-              <div className="nb-gauge__txt">
-                {netTotalMbps != null ? netTotalMbps.toFixed(2) : "—"}{" "}
-                <small>Mbps</small>
-              </div>
-            </div>
-            {m.netDownMbps != null && m.netUpMbps != null ? (
-              <p className="nb-gauge-sub">
-                <span className="nb-gauge-sub__down">↓ {m.netDownMbps.toFixed(2)} Mbps</span>
-                <span className="nb-gauge-sub__sep"> · </span>
-                <span className="nb-gauge-sub__up">↑ {m.netUpMbps.toFixed(2)} Mbps</span>
-              </p>
-            ) : (
-              <p className="nb-gauge-sub nb-gauge-sub--muted">Interface rates unavailable in this environment.</p>
-            )}
-          </div>
-          <div className="nb-table-card">
-            <table className="nb-table">
-              <thead>
-                <tr>
-                  <th>
-                    Application <span className="sort">▼</span>
-                  </th>
-                  <th>PID</th>
-                  <th>TCP</th>
-                  <th>
-                    Download <span className="sort">▼</span>
-                  </th>
-                  <th>
-                    Upload <span className="sort">▼</span>
-                  </th>
-                  <th>Priority</th>
-                  <th>Block</th>
-                </tr>
-              </thead>
-              <tbody>
-                {filteredNetProcs.length === 0 ? (
-                  <tr>
-                    <td colSpan={7} className="nb-table-empty">
-                      {(() => {
-                        const plat = typeof window !== "undefined" ? window.omenShell?.platform : "";
-                        if (plat !== "linux") {
-                          return "Per-process TCP throughput is collected on Linux (from kernel socket byte counters).";
-                        }
-                        if (nbQuery.trim() !== "" && netProcs.length > 0) {
-                          return "No processes match your filter.";
-                        }
-                        return "No TCP sockets with a visible process owner were found (try running the app from a normal session, or install iproute2). Rates update every 2 seconds once connections appear.";
-                      })()}
-                    </td>
-                  </tr>
-                ) : (
-                  filteredNetProcs.map((row, idx) => (
-                    <tr key={`${row.pid}-${idx}-${row.name}`}>
-                      <td>
-                        <span className="proc-ico">{procInitial(row.name)}</span> {row.name}
-                      </td>
-                      <td>{row.pid}</td>
-                      <td>{row.tcpSockets}</td>
-                      <td>{formatKbps(row.downKbps)}</td>
-                      <td>{formatKbps(row.upKbps)}</td>
-                      <td>—</td>
-                      <td>—</td>
-                    </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </section>
+      <AboutSection isActive={v("about")} />
     </div>
   );
 }

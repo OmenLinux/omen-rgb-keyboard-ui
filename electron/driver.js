@@ -13,6 +13,10 @@ const WRITABLE = new Set([
   "zone03",
   "animation_mode",
   "animation_speed",
+  "brightness_lock",
+  "gradient_config",
+  "mute_led",
+  "mute_state",
 ]);
 
 const READABLE = new Set([
@@ -24,6 +28,10 @@ const READABLE = new Set([
   "zone03",
   "animation_mode",
   "animation_speed",
+  "brightness_lock",
+  "gradient_config",
+  "mute_led",
+  "mute_state",
 ]);
 
 const FAN_READABLE = new Set([
@@ -34,6 +42,7 @@ const FAN_READABLE = new Set([
   "fan_curve",
   "fan_curve_enable",
   "fan_temp_zone",
+  "power_limits",
 ]);
 
 const FAN_WRITABLE = new Set([
@@ -42,6 +51,7 @@ const FAN_WRITABLE = new Set([
   "fan_curve",
   "fan_curve_enable",
   "fan_temp_zone",
+  "power_limits",
 ]);
 
 function moduleLoaded() {

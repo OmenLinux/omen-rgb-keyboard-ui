@@ -8,7 +8,9 @@ export function TitleBar({ shell }: Props) {
     <header className="titlebar" id="titlebar">
       <div className="titlebar__brand">
         <OmenBrandLogo className="omen-brand-logo" height={26} />
-        <span className="titlebar__title">OMEN Gaming Hub</span>
+        <span className="titlebar__title">
+          OMEN <span className="titlebar__title-accent">Control</span>
+        </span>
       </div>
       <div className="titlebar__spacer" aria-hidden />
       <div className="titlebar__window-controls no-drag">

@@ -84,6 +84,13 @@ function swatchCssToSysfsHex(css: string, none: boolean): string {
   return "FFFFFF";
 }
 
+function gradientConfigFromZones(zones: Record<ZoneClass, string>): string {
+  const ordered = [zones["third-zone"], zones["second-zone"], zones["first-zone"], zones["fourth-zone"]];
+  const colors = ordered.filter((c, i) => c !== "000000" && ordered.indexOf(c) === i);
+  const cycle = colors.length ? colors : ["E81123", "3EE6C6", "F4F4F5"];
+  return `0,1,2,3:${cycle.join(",")}`;
+}
+
 function applyZonePreviewToDom(zones: Record<ZoneClass, string>) {
   const root = document.getElementById("lighting-keyboard");
   if (!root) return;
@@ -101,15 +108,33 @@ function applyZonePreviewToDom(zones: Record<ZoneClass, string>) {
   }
 }
 
+/** Driver parse_rgb() rejects a leading '#'; writes must be bare RRGGBB. */
+function toSysfsRgb(hex: string): string {
+  return hex.replace(/^#/, "").trim().toUpperCase();
+}
+
 async function writeAllZonesToDriver(
   api: OmenDriverApi,
   zones: Record<ZoneClass, string>,
 ): Promise<string | null> {
   for (const cls of ZONE_CLASSES) {
-    const r = await api.sysfsWrite(ZONE_CLASS_TO_SYSFS[cls], zones[cls]);
+    const r = await api.sysfsWrite(ZONE_CLASS_TO_SYSFS[cls], toSysfsRgb(zones[cls]));
     if (!r.ok) return r.error ?? "Could not write zone color.";
   }
   return null;
+}
+
+async function writeZoneToDriver(
+  api: OmenDriverApi,
+  cls: ZoneClass,
+  hex: string,
+): Promise<string | null> {
+  const r = await api.sysfsWrite(ZONE_CLASS_TO_SYSFS[cls], toSysfsRgb(hex));
+  return r.ok ? null : r.error ?? "Could not write zone.";
+}
+
+function zonesHaveColor(zones: Record<ZoneClass, string>): boolean {
+  return ZONE_CLASSES.some((cls) => zones[cls] !== "000000");
 }
 
 async function writeAnimationSpeedOnly(api: OmenDriverApi, speed: number): Promise<string | null> {
@@ -157,11 +182,19 @@ export function LightingSection({ isActive }: Props) {
   const [animHint, setAnimHint] = useState<string | null>(null);
   const [zoneColors, setZoneColors] = useState<Record<ZoneClass, string>>(() => ({ ...BLANK_ZONE_HEX }));
   const [keyboardHydrated, setKeyboardHydrated] = useState(false);
+  const [brightnessLock, setBrightnessLock] = useState(false);
+  const [muteLedOn, setMuteLedOn] = useState(false);
   const brightnessBeforeOff = useRef(100);
   const prevAnimForDriver = useRef<LightingAnimUi | null>(null);
   const driverMirrorRef = useRef<{ mode: LightingAnimUi; speed: number; brightness: number } | null>(null);
   const sysfsPullInFlightRef = useRef(false);
+  /** While set, ignore sysfs mode/speed/brightness so a fresh click isn't overwritten by a stale read. */
+  const suppressAnimPullUntilRef = useRef(0);
+  const animSpeedRef = useRef(animSpeed);
+  const brightnessRef = useRef(brightness);
   const zoneColorsRef = useRef(zoneColors);
+  animSpeedRef.current = animSpeed;
+  brightnessRef.current = brightness;
   zoneColorsRef.current = zoneColors;
   const api = typeof window !== "undefined" ? window.omenDriver : undefined;
   const canWrite = status?.sysfsWritable === true;
@@ -175,14 +208,18 @@ export function LightingSection({ isActive }: Props) {
     if (sysfsPullInFlightRef.current) return;
     sysfsPullInFlightRef.current = true;
     try {
-      const zones: Record<ZoneClass, string> = { ...BLANK_ZONE_HEX };
-      for (const cls of ZONE_CLASSES) {
-        const r = await sysfsRead(ZONE_CLASS_TO_SYSFS[cls]);
-        if (r.ok && r.value) {
-          const hex = normalizeSysfsHex(r.value);
-          if (hex) zones[cls] = hex;
-        }
+      const holdUi = Date.now() < suppressAnimPullUntilRef.current;
+      const lockR = await sysfsRead("brightness_lock");
+
+      if (holdUi) {
+        // Don't clobber a color/mode the user just wrote with a stale poll.
+        startTransition(() => {
+          setBrightnessLock(lockR.ok && String(lockR.value ?? "").trim() === "1");
+          setKeyboardHydrated(true);
+        });
+        return;
       }
+
       const modeR = await sysfsRead("animation_mode");
       const speedR = await sysfsRead("animation_speed");
       const brR = await sysfsRead("brightness");
@@ -190,12 +227,28 @@ export function LightingSection({ isActive }: Props) {
       const speed = parseSysfsAnimSpeed(speedR.ok ? speedR.value : undefined);
       const mode = sysfsToUiAnimMode(modeR.ok ? modeR.value : undefined, br);
       const effBr = mode === "off" ? 0 : br;
+
+      // Zone show() returns live LED bytes. During effects those are mid-frame
+      // (often black) — never treat them as the user's static palette.
+      let zones: Record<ZoneClass, string> | null = null;
+      if (mode === "static" || mode === "off") {
+        zones = { ...BLANK_ZONE_HEX };
+        for (const cls of ZONE_CLASSES) {
+          const r = await sysfsRead(ZONE_CLASS_TO_SYSFS[cls]);
+          if (r.ok && r.value) {
+            const hex = normalizeSysfsHex(r.value);
+            if (hex) zones[cls] = hex;
+          }
+        }
+      }
+
       prevAnimForDriver.current = mode;
       driverMirrorRef.current = { mode, speed, brightness: effBr };
       startTransition(() => {
-        setZoneColors(zones);
+        if (zones) setZoneColors(zones);
         setAnimMode(mode);
         setAnimSpeed(speed);
+        setBrightnessLock(lockR.ok && String(lockR.value ?? "").trim() === "1");
         if (mode === "off") {
           setBrightness(0);
         } else {
@@ -210,13 +263,6 @@ export function LightingSection({ isActive }: Props) {
   }, [api, status?.sysfsReady]);
 
   const activeCls: ZoneClass = ATTR_TO_ZONE_CLASS[activeZoneAttr] ?? "first-zone";
-  const hexInputRef = useRef<HTMLInputElement>(null);
-
-  useEffect(() => {
-    const el = hexInputRef.current;
-    if (!el || document.activeElement === el) return;
-    el.value = zoneColors[activeCls];
-  }, [zoneColors, activeCls]);
 
   const clearZoneHighlight = useCallback(() => {
     document
@@ -270,27 +316,6 @@ export function LightingSection({ isActive }: Props) {
     return () => window.clearInterval(id);
   }, [isActive, status?.sysfsReady, api, applyLightingFromSysfs, animMode]);
 
-  useEffect(() => {
-    if (!keyboardHydrated) return;
-    if (!api || !canWrite) {
-      prevAnimForDriver.current = animMode;
-      return;
-    }
-    const prev = prevAnimForDriver.current;
-    if (animMode === "static" && prev !== null && prev !== "static") {
-      void (async () => {
-        const err = await writeAllZonesToDriver(api, zoneColorsRef.current);
-        if (err) setAnimHint(err);
-        else {
-          setAnimHint(null);
-          void refresh();
-          window.setTimeout(() => void applyLightingFromSysfs(), 120);
-        }
-      })();
-    }
-    prevAnimForDriver.current = animMode;
-  }, [animMode, canWrite, api, refresh, keyboardHydrated, applyLightingFromSysfs]);
-
   const onKeyAreaClick = useCallback(
     (e: React.MouseEvent) => {
       const t = e.target as HTMLElement;
@@ -323,10 +348,11 @@ export function LightingSection({ isActive }: Props) {
   }, [isActive]);
 
   useEffect(() => {
-    const tab = document.querySelector<HTMLElement>(`.light-anim-tab[data-anim-tab="${animMode}"]`);
-    tab?.scrollIntoView({ behavior: "smooth", inline: "center", block: "nearest" });
+    const tab = document.querySelector<HTMLElement>(`.light-effect[data-anim-tab="${animMode}"]`);
+    tab?.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "nearest" });
   }, [animMode]);
 
+  // Debounced speed / brightness only — mode changes apply immediately in setAnimModeUi.
   useEffect(() => {
     if (!keyboardHydrated || !isActive) return;
     if (!api) return;
@@ -336,62 +362,98 @@ export function LightingSection({ isActive }: Props) {
     }
     const effBr = animMode === "off" ? 0 : brightness;
     const mirror = driverMirrorRef.current;
-    if (
-      mirror &&
-      mirror.mode === animMode &&
-      mirror.speed === animSpeed &&
-      mirror.brightness === effBr
-    ) {
-      return;
-    }
+    if (!mirror) return;
+    if (mirror.mode !== animMode) return; // mode push owns that write
+    if (mirror.speed === animSpeed && mirror.brightness === effBr) return;
+
     const t = window.setTimeout(() => {
       void (async () => {
         const onlySpeed =
-          mirror &&
-          mirror.mode === animMode &&
           mirror.brightness === effBr &&
           mirror.speed !== animSpeed &&
           animMode !== "off" &&
           animMode !== "static";
         const onlyBrightness =
-          mirror &&
-          mirror.mode === animMode &&
-          mirror.speed === animSpeed &&
-          mirror.brightness !== effBr &&
-          animMode !== "off";
+          mirror.speed === animSpeed && mirror.brightness !== effBr && animMode !== "off";
+        if (!onlySpeed && !onlyBrightness) return;
 
+        suppressAnimPullUntilRef.current = Date.now() + 700;
         const err = onlySpeed
           ? await writeAnimationSpeedOnly(api, animSpeed)
-          : onlyBrightness
-            ? await writeBrightnessOnly(api, brightness)
-            : await syncLightingToDriver(api, animMode, animSpeed, brightness);
+          : await writeBrightnessOnly(api, brightness);
         if (err) setAnimHint(err);
         else {
           setAnimHint(null);
           driverMirrorRef.current = { mode: animMode, speed: animSpeed, brightness: effBr };
-          if (!onlySpeed && !onlyBrightness) {
-            void refresh();
-            window.setTimeout(() => void applyLightingFromSysfs(), 100);
-          }
         }
       })();
-    }, 160);
+    }, 120);
     return () => clearTimeout(t);
-  }, [isActive, animMode, animSpeed, brightness, canWrite, api, refresh, keyboardHydrated, applyLightingFromSysfs]);
+  }, [isActive, animMode, animSpeed, brightness, canWrite, api, keyboardHydrated]);
 
-  const setAnimModeUi = useCallback((next: LightingAnimUi, brightnessOverride?: number) => {
-    if (next === "off" && animMode !== "off") {
-      brightnessBeforeOff.current = brightness;
-    }
-    if (animMode === "off" && next !== "off") {
-      if (brightnessOverride !== undefined) setBrightness(brightnessOverride);
-      else setBrightness(brightnessBeforeOff.current);
-    }
-    setAnimMode(next);
-  }, [animMode, brightness]);
+  const setAnimModeUi = useCallback(
+    (next: LightingAnimUi, brightnessOverride?: number) => {
+      let nextBrightness = brightnessRef.current;
+      if (next === "off" && animMode !== "off") {
+        brightnessBeforeOff.current = brightnessRef.current;
+        nextBrightness = 0;
+      }
+      if (animMode === "off" && next !== "off") {
+        nextBrightness =
+          brightnessOverride !== undefined ? brightnessOverride : brightnessBeforeOff.current;
+        setBrightness(nextBrightness);
+      } else if (next === "off") {
+        setBrightness(0);
+      }
+
+      setAnimMode(next);
+
+      if (!api || !canWrite) return;
+
+      // One click → write now. Hold off sysfs pulls so polling can't snap the tab back.
+      suppressAnimPullUntilRef.current = Date.now() + 900;
+      const speed = animSpeedRef.current;
+      const comingFromEffect = animMode !== "static" && animMode !== "off" && next === "static";
+      void (async () => {
+        const err = await syncLightingToDriver(api, next, speed, nextBrightness);
+        if (!err && next === "gradient") {
+          const grad = await api.sysfsWrite(
+            "gradient_config",
+            gradientConfigFromZones(zoneColorsRef.current),
+          );
+          if (!grad.ok) {
+            setAnimHint("Couldn't update the gradient.");
+            return;
+          }
+        }
+        // Only re-paint zones when leaving an effect if we still have a real
+        // static palette. Never push blacks scraped from mid-animation LEDs.
+        if (!err && comingFromEffect && zonesHaveColor(zoneColorsRef.current)) {
+          const zoneErr = await writeAllZonesToDriver(api, zoneColorsRef.current);
+          if (zoneErr) {
+            setAnimHint(zoneErr);
+            return;
+          }
+        }
+        if (err) {
+          setAnimHint(err);
+          return;
+        }
+        setAnimHint(null);
+        driverMirrorRef.current = {
+          mode: next,
+          speed,
+          brightness: next === "off" ? 0 : nextBrightness,
+        };
+        void refresh();
+      })();
+    },
+    [animMode, api, canWrite, refresh],
+  );
 
   const applyToKeyboard = useCallback(async () => {
     if (!api || !canWrite) return;
+    suppressAnimPullUntilRef.current = Date.now() + 900;
     const err = await syncLightingToDriver(api, animMode, animSpeed, brightness);
     if (err) {
       setAnimHint(err);
@@ -404,6 +466,13 @@ export function LightingSection({ isActive }: Props) {
         return;
       }
     }
+    if (animMode === "gradient") {
+      const grad = await api.sysfsWrite("gradient_config", gradientConfigFromZones(zoneColors));
+      if (!grad.ok) {
+        setAnimHint("Couldn't update the gradient.");
+        return;
+      }
+    }
     setAnimHint(null);
     driverMirrorRef.current = {
       mode: animMode,
@@ -411,8 +480,7 @@ export function LightingSection({ isActive }: Props) {
       brightness: animMode === "off" ? 0 : brightness,
     };
     void refresh();
-    window.setTimeout(() => void applyLightingFromSysfs(), 120);
-  }, [api, canWrite, animMode, animSpeed, brightness, zoneColors, refresh, applyLightingFromSysfs]);
+  }, [api, canWrite, animMode, animSpeed, brightness, zoneColors, refresh]);
 
   const discardChanges = useCallback(async () => {
     if (api?.sysfsRead && status?.sysfsReady) {
@@ -456,14 +524,65 @@ export function LightingSection({ isActive }: Props) {
     }
   }, [api, canWrite, setAnimModeUi, refresh, clearZoneHighlight, applyLightingFromSysfs]);
 
+  const paintAllZones = useCallback(async () => {
+    if (!api || !canWrite) return;
+    const hex = toSysfsRgb(zoneColors[activeCls]);
+    const br = brightnessRef.current || brightnessBeforeOff.current || 100;
+    suppressAnimPullUntilRef.current = Date.now() + 900;
+    if (animMode !== "static") setAnimMode("static");
+    if (brightnessRef.current <= 0) setBrightness(br);
+    if (brightnessRef.current <= 0 || animMode === "off") {
+      const b = await writeBrightnessOnly(api, br);
+      if (b) {
+        setAnimHint(b);
+        return;
+      }
+    }
+    const r = await api.sysfsWrite("all", hex);
+    if (!r.ok) {
+      setAnimHint("Couldn't paint the keyboard.");
+      return;
+    }
+    setZoneColors({
+      "first-zone": hex,
+      "second-zone": hex,
+      "third-zone": hex,
+      "fourth-zone": hex,
+    });
+    setAnimHint(null);
+    driverMirrorRef.current = {
+      mode: "static",
+      speed: animSpeedRef.current,
+      brightness: br,
+    };
+    void refresh();
+  }, [api, canWrite, zoneColors, activeCls, animMode, refresh]);
+
+  const toggleMuteLight = useCallback(async () => {
+    if (!api || !canWrite) return;
+    const next = !muteLedOn;
+    const r = await api.sysfsWrite("mute_led", next ? "1" : "0");
+    if (!r.ok) {
+      setAnimHint("Couldn't change the mute light.");
+      return;
+    }
+    setMuteLedOn(next);
+    setAnimHint(null);
+  }, [api, canWrite, muteLedOn]);
+
   const rgbBanner =
     status &&
     !status.sysfsWritable &&
     (status.supported
       ? status.sysfsReady
-        ? "Driver sysfs is present but not writable from this user. Install udev rules from the driver repo (install-udev-rules.sh) or apply colors with sudo in a terminal."
-        : "omen-rgb-keyboard not detected. Install it on Linux (see System Vitals → RGB keyboard driver), then return here to apply lighting."
-      : "Hardware RGB uses the Linux omen-rgb-keyboard driver. This page is a visual preview on this platform.");
+        ? "Lighting can be previewed here, but this account can't change the keyboard yet."
+        : "Install the OmenLinux keyboard driver to control the lights."
+      : "This is a preview. Keyboard lights change on a supported laptop.");
+
+  const speedDisabled = animMode === "off" || animMode === "static";
+  const brightnessDisabled = animMode === "off";
+  const speedPct = ((animSpeed - 1) / 9) * 100;
+  const brightnessPct = animMode === "off" ? 0 : brightness;
 
   return (
     <section className={`view${isActive ? " is-active" : ""}`} id="view-lighting" data-view="lighting" role="tabpanel">
@@ -477,88 +596,7 @@ export function LightingSection({ isActive }: Props) {
           {animHint}
         </div>
       ) : null}
-      <div className="lighting-anim-card">
-        <header className="lighting-anim-card__head">
-          <h2 className="lighting-anim-card__title">Animation</h2>
-          <p className="lighting-anim-card__sub">
-            Zone colors, brightness, speed, and effect are read from sysfs so the preview matches the keyboard. Moving
-            effects only run on the hardware — the on-screen keys show the stored zone colors and overall brightness.
-          </p>
-        </header>
-        <div className="light-anim-tabstrip" role="tablist" aria-label="Animation effect">
-          <div className="light-anim-tabstrip-scroll">
-            <button
-              type="button"
-              role="tab"
-              aria-selected={animMode === "off"}
-              data-anim-tab="off"
-              className={`light-anim-tab${animMode === "off" ? " is-active" : ""}`}
-              onClick={() => setAnimModeUi("off")}
-            >
-              Off
-            </button>
-            {LIGHTING_ANIMATION_MODES.map((m) => (
-              <button
-                key={m.id}
-                type="button"
-                role="tab"
-                aria-selected={animMode === m.id}
-                data-anim-tab={m.id}
-                className={`light-anim-tab${animMode === m.id ? " is-active" : ""}`}
-                onClick={() => setAnimModeUi(m.id)}
-              >
-                {m.label}
-              </button>
-            ))}
-          </div>
-        </div>
-        <div className="lighting-anim-tab-panel" role="tabpanel" aria-label="Animation options">
-          <div className="lighting-anim-tab-panel__sliders">
-            <label className="light-slider-label" htmlFor="light-anim-speed">
-              Animation speed
-              <span className="light-slider-val">{animSpeed}</span>
-            </label>
-            <input
-              id="light-anim-speed"
-              type="range"
-              className="light-slider"
-              min={1}
-              max={10}
-              step={1}
-              value={animSpeed}
-              disabled={animMode === "off" || animMode === "static"}
-              onChange={(e) => setAnimSpeed(Number(e.target.value))}
-            />
-            <label className="light-slider-label" htmlFor="light-brightness">
-              Brightness
-              <span className="light-slider-val">{animMode === "off" ? 0 : brightness}%</span>
-            </label>
-            <input
-              id="light-brightness"
-              type="range"
-              className="light-slider"
-              min={0}
-              max={100}
-              step={1}
-              value={animMode === "off" ? 0 : brightness}
-              disabled={animMode === "off"}
-              onChange={(e) => {
-                const v = Number(e.target.value);
-                if (animMode === "off") {
-                  setAnimModeUi("static", v);
-                  return;
-                }
-                setBrightness(v);
-              }}
-            />
-          </div>
-          {animMode !== "static" && animMode !== "off" ? (
-            <p className="lighting-anim-card__note lighting-anim-tab-panel__note">
-              Use <strong>Static</strong> to paint zones with the color swatches below.
-            </p>
-          ) : null}
-        </div>
-      </div>
+
       <div className="keyboard-stage keyboard-stage--omen-lkb">
         <div className="light-kb-chassis light-kb-chassis--omen">
           <div id="lighting-keyboard" className="omen-lkb-root" role="group" aria-label="Keyboard lighting zones">
@@ -603,13 +641,30 @@ export function LightingSection({ isActive }: Props) {
                     const hex = swatchCssToSysfsHex(s.c, Boolean(s.none));
                     setZoneColors((prev) => ({ ...prev, [cls]: hex }));
                     setAnimHint(null);
-                    if (canWrite && animMode === "static" && api) {
+                    // Zone writes force static in the driver — always push color.
+                    if (canWrite && api) {
+                      if (animMode !== "static") setAnimMode("static");
+                      const br = brightnessRef.current || brightnessBeforeOff.current || 100;
+                      if (brightnessRef.current <= 0) setBrightness(br);
+                      suppressAnimPullUntilRef.current = Date.now() + 900;
                       void (async () => {
-                        const r = await api.sysfsWrite(ZONE_CLASS_TO_SYSFS[cls], hex);
-                        if (!r.ok) setAnimHint(r.error ?? "Could not write zone.");
+                        // Brightness first: zone_set scales the RGB by global_brightness.
+                        if (brightnessRef.current <= 0 || animMode === "off") {
+                          const b = await writeBrightnessOnly(api, br);
+                          if (b) {
+                            setAnimHint(b);
+                            return;
+                          }
+                        }
+                        const err = await writeZoneToDriver(api, cls, hex);
+                        if (err) setAnimHint(err);
                         else {
+                          driverMirrorRef.current = {
+                            mode: "static",
+                            speed: animSpeedRef.current,
+                            brightness: br,
+                          };
                           void refresh();
-                          window.setTimeout(() => void applyLightingFromSysfs(), 100);
                         }
                       })();
                     }
@@ -619,93 +674,236 @@ export function LightingSection({ isActive }: Props) {
                 </button>
               ))}
             </div>
-            <div className="light-level-toggle" role="group" aria-label="Editor mode">
+            <button
+              type="button"
+              className="btn-outline btn-outline--sm"
+              disabled={!canWrite}
+              onClick={() => void paintAllZones()}
+            >
+              Paint all keys
+            </button>
+            <div className="light-level-toggle" role="group" aria-label="Color picker mode">
               <button type="button" className={level === "basic" ? "is-on" : ""} onClick={() => setLevel("basic")}>
-                BASIC
+                Swatches
               </button>
               <button type="button" className={level === "advanced" ? "is-on" : ""} onClick={() => setLevel("advanced")}>
-                ADVANCED
+                Custom
               </button>
             </div>
             {level === "advanced" ? (
-              <div className="light-advanced-panel">
-                <p className="light-advanced-panel__hint">
-                  Use the picker for any RGB value on the highlighted zone (same 6-digit values as sysfs).
-                </p>
-                <div className="light-advanced-panel__row">
-                  <label className="light-advanced-picker">
-                    <span className="light-advanced-picker__lbl">Color</span>
-                    <input
-                      type="color"
-                      className="light-advanced-picker__input"
-                      value={`#${zoneColors[activeCls].toLowerCase()}`}
-                      aria-label={`Color picker for ${activeCls}`}
-                      onChange={(e) => {
-                        const body = e.target.value.replace("#", "").toUpperCase();
-                        if (!/^[0-9A-F]{6}$/.test(body)) return;
-                        setZoneColors((prev) => ({ ...prev, [activeCls]: body }));
-                        setAnimHint(null);
-                        if (canWrite && animMode === "static" && api) {
-                          void (async () => {
-                            const r = await api.sysfsWrite(ZONE_CLASS_TO_SYSFS[activeCls], body);
-                            if (!r.ok) setAnimHint(r.error ?? "Could not write zone.");
-                            else {
-                              void refresh();
-                              window.setTimeout(() => void applyLightingFromSysfs(), 100);
-                            }
-                          })();
+              <label className="light-advanced-picker">
+                <span className="light-advanced-picker__lbl">Custom</span>
+                <input
+                  type="color"
+                  className="light-advanced-picker__input"
+                  value={`#${zoneColors[activeCls].toLowerCase()}`}
+                  aria-label="Custom color"
+                  onChange={(e) => {
+                    const body = e.target.value.replace("#", "").toUpperCase();
+                    if (!/^[0-9A-F]{6}$/.test(body)) return;
+                    setZoneColors((prev) => ({ ...prev, [activeCls]: body }));
+                    setAnimHint(null);
+                    if (canWrite && api) {
+                      if (animMode !== "static") setAnimMode("static");
+                      const br = brightnessRef.current || brightnessBeforeOff.current || 100;
+                      if (brightnessRef.current <= 0) setBrightness(br);
+                      suppressAnimPullUntilRef.current = Date.now() + 900;
+                      void (async () => {
+                        if (brightnessRef.current <= 0 || animMode === "off") {
+                          const b = await writeBrightnessOnly(api, br);
+                          if (b) {
+                            setAnimHint(b);
+                            return;
+                          }
                         }
-                      }}
-                    />
-                  </label>
-                  <label className="light-advanced-hex">
-                    <span className="light-advanced-hex__lbl">Hex</span>
-                    <input
-                      ref={hexInputRef}
-                      type="text"
-                      className="light-advanced-hex__input"
-                      spellCheck={false}
-                      defaultValue={zoneColors[activeCls]}
-                      maxLength={6}
-                      aria-label="Six-digit hex RRGGBB for selected zone"
-                      onBlur={(e) => {
-                        const h = e.target.value.replace(/^#/, "").trim().toUpperCase();
-                        if (!/^[0-9A-F]{6}$/.test(h)) {
-                          e.target.value = zoneColors[activeCls];
-                          return;
+                        const err = await writeZoneToDriver(api, activeCls, body);
+                        if (err) setAnimHint("Couldn't set that color.");
+                        else {
+                          driverMirrorRef.current = {
+                            mode: "static",
+                            speed: animSpeedRef.current,
+                            brightness: br,
+                          };
+                          void refresh();
                         }
-                        setZoneColors((prev) => ({ ...prev, [activeCls]: h }));
-                        setAnimHint(null);
-                        if (canWrite && animMode === "static" && api) {
-                          void (async () => {
-                            const r = await api.sysfsWrite(ZONE_CLASS_TO_SYSFS[activeCls], h);
-                            if (!r.ok) setAnimHint(r.error ?? "Could not write zone.");
-                            else {
-                              void refresh();
-                              window.setTimeout(() => void applyLightingFromSysfs(), 100);
-                            }
-                          })();
-                        }
-                      }}
-                    />
-                  </label>
-                </div>
-              </div>
+                      })();
+                    }
+                  }}
+                />
+              </label>
             ) : null}
           </div>
         </div>
-        <p className="keyboard-hint">Select a zone to begin.</p>
+        <p className="keyboard-hint">Click a zone, then pick a color.</p>
       </div>
+
+      <div className="lighting-anim-card">
+        <header className="lighting-anim-card__head">
+          <h2 className="lighting-anim-card__title">Effects</h2>
+          <p className="lighting-anim-card__sub">Choose a look, then tune brightness and speed. Hit Apply when ready.</p>
+        </header>
+
+        <div className="light-effect-bar" role="tablist" aria-label="Animation effect">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={animMode === "off"}
+            data-anim-tab="off"
+            className={`light-effect${animMode === "off" ? " is-active" : ""}`}
+            onClick={() => setAnimModeUi("off")}
+          >
+            <span className="light-effect__preview" aria-hidden>
+              <span className="light-effect__beam" />
+            </span>
+            <span className="light-effect__label">Off</span>
+          </button>
+          {LIGHTING_ANIMATION_MODES.map((m) => (
+            <button
+              key={m.id}
+              type="button"
+              role="tab"
+              aria-selected={animMode === m.id}
+              data-anim-tab={m.id}
+              className={`light-effect${animMode === m.id ? " is-active" : ""}`}
+              onClick={() => setAnimModeUi(m.id)}
+            >
+              <span className="light-effect__preview" aria-hidden>
+                <span className="light-effect__beam" />
+                <span className="light-effect__beam light-effect__beam--b" />
+                <span className="light-effect__beam light-effect__beam--c" />
+              </span>
+              <span className="light-effect__label">{m.label}</span>
+            </button>
+          ))}
+        </div>
+
+        <div className="lighting-anim-controls" role="tabpanel" aria-label="Animation options">
+          <div className={`light-meter${speedDisabled ? " is-disabled" : ""}`}>
+            <div className="light-meter__head">
+              <label className="light-meter__label" htmlFor="light-anim-speed">
+                Speed
+              </label>
+              <span className="light-meter__value">{animSpeed}</span>
+            </div>
+            <div className="light-meter__track">
+              <div className="light-meter__fill" style={{ width: `${speedPct}%` }} aria-hidden />
+              <input
+                id="light-anim-speed"
+                type="range"
+                className="light-meter__input"
+                min={1}
+                max={10}
+                step={1}
+                value={animSpeed}
+                disabled={speedDisabled}
+                onChange={(e) => setAnimSpeed(Number(e.target.value))}
+              />
+            </div>
+            <div className="light-meter__ends" aria-hidden>
+              <span>Slow</span>
+              <span>Fast</span>
+            </div>
+          </div>
+
+          <div className={`light-meter${brightnessDisabled ? " is-disabled" : ""}`}>
+            <div className="light-meter__head">
+              <label className="light-meter__label" htmlFor="light-brightness">
+                Brightness
+              </label>
+              <span className="light-meter__value">{brightnessPct}%</span>
+            </div>
+            <div className="light-meter__track">
+              <div className="light-meter__fill" style={{ width: `${brightnessPct}%` }} aria-hidden />
+              <input
+                id="light-brightness"
+                type="range"
+                className="light-meter__input"
+                min={0}
+                max={100}
+                step={1}
+                value={brightnessPct}
+                disabled={brightnessDisabled}
+                onChange={(e) => {
+                  const v = Number(e.target.value);
+                  if (animMode === "off") {
+                    setAnimModeUi("static", v);
+                    return;
+                  }
+                  setBrightness(v);
+                }}
+              />
+            </div>
+            <div className="light-meter__ends" aria-hidden>
+              <span>Dim</span>
+              <span>Max</span>
+            </div>
+          </div>
+
+          <div className="light-toggles">
+            <div className="light-lock-row">
+              <div className="light-lock-row__copy">
+                <span className="light-lock-row__title">Mute light</span>
+                <span className="light-lock-row__sub">Hardware mute LED</span>
+              </div>
+              <button
+                type="button"
+                className="switch"
+                aria-pressed={muteLedOn}
+                aria-label="Mute light"
+                disabled={!canWrite}
+                onClick={() => void toggleMuteLight()}
+              >
+                <span className="switch__knob" />
+              </button>
+            </div>
+            <div className="light-lock-row">
+              <div className="light-lock-row__copy">
+                <span className="light-lock-row__title">Keep brightness on idle</span>
+                <span className="light-lock-row__sub">Don’t dim when idle</span>
+              </div>
+              <button
+                type="button"
+                className="switch"
+                aria-pressed={brightnessLock}
+                aria-label="Brightness lock"
+                disabled={!canWrite}
+                onClick={() => {
+                  const next = !brightnessLock;
+                  setBrightnessLock(next);
+                  if (!api || !canWrite) return;
+                  void (async () => {
+                    const r = await api.sysfsWrite("brightness_lock", next ? "1" : "0");
+                    if (!r.ok) {
+                      setBrightnessLock(!next);
+                      setAnimHint(r.error ?? "Could not set brightness lock.");
+                      return;
+                    }
+                    setAnimHint(null);
+                    window.setTimeout(() => void applyLightingFromSysfs(), 150);
+                  })();
+                }}
+              >
+                <span className="switch__knob" />
+              </button>
+            </div>
+          </div>
+
+          {animMode === "gradient" ? (
+            <p className="lighting-anim-card__note">Gradient uses the colors already on the keyboard.</p>
+          ) : null}
+        </div>
+      </div>
+
       <footer className="light-footer">
         <button type="button" className="linkish" onClick={() => restoreDefaults()}>
-          Restore defaults
+          Reset lights
         </button>
         <div className="light-footer__btns">
           <button type="button" className="btn-outline" onClick={() => void discardChanges()}>
-            Discard changes
+            Undo
           </button>
-          <button type="button" className="btn-outline" onClick={() => void applyToKeyboard()} disabled={!api || !canWrite}>
-            Apply
+          <button type="button" className="btn-primary" onClick={() => void applyToKeyboard()} disabled={!api || !canWrite}>
+            Apply to keyboard
           </button>
         </div>
       </footer>

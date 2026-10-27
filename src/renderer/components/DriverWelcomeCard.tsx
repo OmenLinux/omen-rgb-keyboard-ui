@@ -97,7 +97,7 @@ export function DriverWelcomeCard({ onDismiss, onDismissForever }: Props) {
             Finish keyboard RGB setup
           </h2>
           <p className="driver-welcome__lead">
-            OMEN Gaming Hub uses the open-source{" "}
+            OmenLinux uses the open-source{" "}
             <button type="button" className="linkish" onClick={openRepo}>
               omen-rgb-keyboard
             </button>{" "}

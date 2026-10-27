@@ -10,6 +10,7 @@ export const LIGHTING_ANIMATION_MODES = [
   { id: "aurora", label: "Aurora" },
   { id: "disco", label: "Disco" },
   { id: "gradient", label: "Gradient" },
+  { id: "spectrum", label: "Spectrum" },
 ] as const;
 
 export type LightingAnimationModeId = (typeof LIGHTING_ANIMATION_MODES)[number]["id"];

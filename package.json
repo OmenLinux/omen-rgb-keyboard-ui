@@ -16,11 +16,15 @@
     "build:renderer": "vite build",
     "start": "electron .",
     "pack": "npm run build:renderer && electron-builder --dir",
-    "build:win": "npm run build:renderer && electron-builder --win --publish never",
-    "build:linux": "npm run build:renderer && electron-builder --linux --publish never"
+    "build:win": "npm run build:renderer && electron-builder --win nsis --publish never",
+    "build:linux": "npm run build:renderer && electron-builder --linux AppImage deb --publish never",
+    "release:win": "npm run build:renderer && electron-builder --win nsis --publish always",
+    "release:linux": "npm run build:renderer && electron-builder --linux AppImage deb --publish always"
   },
   "dependencies": {
+    "@fontsource/manrope": "^5.3.0",
     "@fontsource/oxanium": "^5.2.8",
+    "electron-updater": "^6.8.11",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },
@@ -49,9 +53,9 @@
     ],
     "win": {
       "target": [
-        "nsis",
-        "portable"
-      ]
+        "nsis"
+      ],
+      "artifactName": "${productName}-${version}-Setup.${ext}"
     },
     "linux": {
       "target": [
@@ -59,8 +63,17 @@
         "deb"
       ],
       "category": "Utility",
-      "maintainer": "OmenLinux <noreply@github.com>"
+      "maintainer": "OmenLinux <noreply@github.com>",
+      "artifactName": "${productName}-${version}.${ext}"
     },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "OmenLinux",
+        "repo": "omen-rgb-keyboard-ui",
+        "releaseType": "release"
+      }
+    ],
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true

@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import type { ViewId } from "../types";
 import { NAV_ITEMS } from "../types";
-import { APP_VERSION, DEVICE_MODEL_LAST_RESORT } from "../version";
+import { useAppVersion } from "../hooks/useAppVersion";
+import { DEVICE_MODEL_LAST_RESORT } from "../version";
 
 type Props = {
   activeView: ViewId;
@@ -25,6 +26,7 @@ function preferMachineLabel(a: string | undefined, b: string | undefined): strin
 }
 
 export function Sidebar({ activeView, onSelect }: Props) {
+  const appVersion = useAppVersion();
   const [deviceName, setDeviceName] = useState<string | null>(null);
 
   useEffect(() => {
@@ -99,11 +101,18 @@ export function Sidebar({ activeView, onSelect }: Props) {
         </nav>
       </div>
       <div className="sidebar__footer">
-        <a href="#" className="sidebar-foot-link" onClick={(e) => e.preventDefault()}>
-          Help & feedback
+        <a
+          href="https://github.com/OmenLinux"
+          className="sidebar-foot-link"
+          onClick={(e) => {
+            e.preventDefault();
+            void window.omenDriver?.openExternal("https://github.com/OmenLinux");
+          }}
+        >
+          GitHub
         </a>
         <div className="sidebar__meta">
-          <span className="sidebar__ver">{APP_VERSION}</span>
+          <span className="sidebar__ver">v{appVersion}</span>
         </div>
       </div>
     </aside>

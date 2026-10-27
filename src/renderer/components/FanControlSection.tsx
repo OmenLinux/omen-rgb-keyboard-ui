@@ -1,18 +1,18 @@
-import { useCallback, useEffect, useId, useRef, useState, type Dispatch, type SetStateAction } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useRef,
+  useState,
+  type CSSProperties,
+  type Dispatch,
+  type SetStateAction,
+} from "react";
 import { useDriver } from "../driverContext";
+import { FAN_CHANGED, notifyFanChanged } from "../fanEvents";
+import { formatTempMaybeC, meterClass, tempHeatMaybeC } from "../heatScale";
 
 const FAN = (name: string) => `fan/${name}`;
-
-const THERMAL_PRESETS = ["silent", "normal", "performance"] as const;
-type ThermalPreset = (typeof THERMAL_PRESETS)[number];
-
-const PROFILE_THERMAL: Record<ThermalPreset, "max" | "auto" | "manual"> = {
-  performance: "max",
-  normal: "auto",
-  silent: "manual",
-};
-
-const COMMON_THERMAL_ZONES = ["x86_pkg_temp", "acpitz", "k10temp", "pch_cannonlake"] as const;
 
 const DEFAULT_CURVE: { temp: number; pct: number }[] = [
   { temp: 35, pct: 22 },
@@ -101,19 +101,6 @@ function polylineFixedAxis(pts: CurvePoint[]): string {
   return sorted.map((p) => `${tempToX(p.temp).toFixed(1)},${pctToY(p.pct).toFixed(1)}`).join(" ");
 }
 
-function isThermalPresetString(s: string): s is ThermalPreset {
-  return (THERMAL_PRESETS as readonly string[]).includes(s.trim());
-}
-
-function isDriverEcUnmapped(s: string): boolean {
-  const t = s.trim().toLowerCase();
-  return t === "unknown";
-}
-
-function isDriverEcReadError(s: string): boolean {
-  return s.trim().toLowerCase().startsWith("unknown (ec_read");
-}
-
 function driverRpmMissing(s: string): boolean {
   const t = (s || "").trim();
   if (!t || t === "—") return true;
@@ -122,26 +109,151 @@ function driverRpmMissing(s: string): boolean {
   return false;
 }
 
-function rpmLine(driverRaw: string): string {
+function parseRpm(driverRaw: string): number | null {
   const d = (driverRaw || "").trim();
-  if (!driverRpmMissing(d)) {
-    if (/^\d+$/.test(d)) return `${d} RPM`;
-    return d;
-  }
-  return "—";
+  if (driverRpmMissing(d)) return null;
+  const n = Number(d);
+  return Number.isFinite(n) && n >= 0 ? n : null;
 }
 
-function normalizeZoneFromDriver(raw: string | null): { mode: "auto" | "preset" | "custom"; preset?: string; custom?: string } {
-  if (raw == null) return { mode: "auto" };
-  const z = raw.trim();
-  if (!z || z.toLowerCase() === "(auto)") return { mode: "auto" };
-  if ((COMMON_THERMAL_ZONES as readonly string[]).includes(z)) return { mode: "preset", preset: z };
-  return { mode: "custom", custom: z };
+/** Map RPM to one full spin duration in seconds. Higher RPM → faster. */
+function rpmToSpinSeconds(rpm: number | null, maxFan: boolean): number | null {
+  if (rpm == null) return null;
+  if (rpm <= 0) return null;
+  const effective = maxFan ? Math.max(rpm, 4800) : rpm;
+  const capped = Math.min(7000, Math.max(400, effective));
+  // ~2.8s at idle, ~0.18s near max — readable but still lively
+  return 2.8 - ((capped - 400) / (7000 - 400)) * (2.8 - 0.18);
 }
 
-function curveSummary(pts: CurvePoint[]): string {
-  const s = [...pts].sort((a, b) => a.temp - b.temp);
-  return s.map((p) => `${Math.round(p.temp)}°/${Math.round(p.pct)}%`).join(" → ");
+function formatRpm(rpm: number | null): string {
+  if (rpm == null) return "—";
+  return rpm.toLocaleString("en-US");
+}
+
+const FAN_BLADES = 11;
+
+function IntakeFan({
+  tone,
+  spinning,
+}: {
+  tone: "cpu" | "gpu";
+  spinning: boolean;
+}) {
+  return (
+    <div className={`chassis-fan chassis-fan--${tone}${spinning ? " is-spinning" : ""}`}>
+      <div className={`chassis-fan__rotor${spinning ? "" : " is-stopped"}`}>
+        {Array.from({ length: FAN_BLADES }, (_, i) => (
+          <span
+            key={i}
+            className="chassis-fan__blade"
+            style={{ transform: `rotate(${(360 / FAN_BLADES) * i}deg)` }}
+          />
+        ))}
+        <span className="chassis-fan__hub" />
+      </div>
+    </div>
+  );
+}
+
+type ChassisUndersideProps = {
+  cpuRaw: string;
+  gpuRaw: string;
+  maxFan: boolean;
+  cpuTempC: number | null;
+  gpuTempC: number | null;
+  useCelsius: boolean;
+};
+
+function ChassisUnderside({
+  cpuRaw,
+  gpuRaw,
+  maxFan,
+  cpuTempC,
+  gpuTempC,
+  useCelsius,
+}: ChassisUndersideProps) {
+  const cpuRpm = parseRpm(cpuRaw);
+  const gpuRpm = parseRpm(gpuRaw);
+  const cpuSpin = rpmToSpinSeconds(cpuRpm, maxFan);
+  const gpuSpin = rpmToSpinSeconds(gpuRpm, maxFan);
+  const bars = [1, 2, 3, 4];
+
+  return (
+    <div
+      className={`chassis${maxFan ? " is-boost" : ""}`}
+      style={
+        {
+          "--cpu-spin": cpuSpin != null ? `${cpuSpin.toFixed(3)}s` : "0s",
+          "--gpu-spin": gpuSpin != null ? `${gpuSpin.toFixed(3)}s` : "0s",
+        } as CSSProperties
+      }
+    >
+      <div className="chassis__shell">
+        <div className="chassis__decor" aria-hidden>
+          <div className="chassis__foot chassis__foot--top" />
+          <div className="chassis__screws chassis__screws--top">
+            {[0, 1, 2, 3].map((i) => (
+              <span key={i} className="chassis__screw" />
+            ))}
+          </div>
+
+          <div className="chassis__grille">
+            <div className="chassis__fans">
+              <IntakeFan tone="cpu" spinning={cpuSpin != null} />
+              <IntakeFan tone="gpu" spinning={gpuSpin != null} />
+            </div>
+            <div className="chassis__mesh" />
+            <div className="chassis__slats" />
+            <div className="chassis__bars">
+              {bars.map((b) => (
+                <span key={b} className="chassis__bar" />
+              ))}
+            </div>
+          </div>
+        </div>
+
+        <div className="chassis__plate">
+          <div className={`chassis__readout chassis__readout--cpu${cpuSpin != null ? " is-live" : ""}`}>
+            <div className="chassis__readout-head">
+              <span className="chassis__readout-label">CPU</span>
+              <span className={`chassis__readout-temp ${meterClass(tempHeatMaybeC(cpuTempC))}`}>
+                {formatTempMaybeC(cpuTempC, useCelsius)}
+              </span>
+            </div>
+            <div className="chassis__readout-rpm">
+              <span className="chassis__readout-value">{formatRpm(cpuRpm)}</span>
+              <span className="chassis__readout-unit">RPM</span>
+            </div>
+          </div>
+          <span className="chassis__brand" aria-hidden>
+            OMEN
+          </span>
+          <div className={`chassis__readout chassis__readout--gpu${gpuSpin != null ? " is-live" : ""}`}>
+            <div className="chassis__readout-head">
+              <span className="chassis__readout-label">GPU</span>
+              <span className={`chassis__readout-temp ${meterClass(tempHeatMaybeC(gpuTempC))}`}>
+                {formatTempMaybeC(gpuTempC, useCelsius)}
+              </span>
+            </div>
+            <div className="chassis__readout-rpm">
+              <span className="chassis__readout-value">{formatRpm(gpuRpm)}</span>
+              <span className="chassis__readout-unit">RPM</span>
+            </div>
+          </div>
+        </div>
+
+        <div className="chassis__decor" aria-hidden>
+          <div className="chassis__screws chassis__screws--bottom">
+            {[0, 1, 2, 3].map((i) => (
+              <span key={i} className="chassis__screw" />
+            ))}
+          </div>
+          <div className="chassis__foot chassis__foot--bottom" />
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function clientToSvg(svg: SVGSVGElement, clientX: number, clientY: number) {
@@ -231,63 +343,94 @@ function FanCurveModal({
           <h3 id={titleId} className="fan-curve-modal__title">
             Fan curve
           </h3>
-          <p className="fan-curve-modal__sub muted">Drag points. Temperature (horizontal), fan % (vertical). Driver allows 2–8 points.</p>
+          <p className="fan-curve-modal__sub">Drag points on the chart. Left = cooler, right = hotter, up = faster.</p>
         </div>
 
-        <svg ref={svgRef} className="fan-curve-modal__svg" viewBox={`0 0 ${VB_W} ${VB_H}`}>
-          <defs>
-            <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="rgba(45, 212, 191, 0.28)" />
-              <stop offset="100%" stopColor="rgba(45, 212, 191, 0.03)" />
-            </linearGradient>
-          </defs>
-          <rect x={PAD_L} y={PAD_T} width={PLOT_W} height={PLOT_H} rx="6" fill="rgba(0,0,0,0.35)" stroke="rgba(255,255,255,0.08)" />
-          <text x={PAD_L} y={PAD_T - 6} fill="#9ca3af" fontSize="10">
-            100% fan
-          </text>
-          <text x={PAD_L} y={PAD_T + PLOT_H + 22} fill="#9ca3af" fontSize="10">
-            {T_AXIS_LO}°C
-          </text>
-          <text x={PAD_L + PLOT_W - 36} y={PAD_T + PLOT_H + 22} fill="#9ca3af" fontSize="10" textAnchor="end">
-            {T_AXIS_HI}°C
-          </text>
-          <line x1={PAD_L} y1={PAD_T + PLOT_H} x2={PAD_L + PLOT_W} y2={PAD_T + PLOT_H} stroke="rgba(255,255,255,0.12)" />
-          <line x1={PAD_L} y1={PAD_T} x2={PAD_L} y2={PAD_T + PLOT_H} stroke="rgba(255,255,255,0.12)" />
-          {curvePoints.length >= 2 ? <polygon fill={`url(#${gradId})`} stroke="none" points={fillPts} /> : null}
-          {curvePoints.length >= 2 ? (
-            <polyline fill="none" stroke="#5eead4" strokeWidth="2.5" strokeLinejoin="round" points={linePts} />
-          ) : null}
-          {curvePoints.map((p, i) => (
-            <circle
-              key={i}
-              cx={tempToX(p.temp)}
-              cy={pctToY(p.pct)}
-              r={canDriveFan ? 9 : 7}
-              fill={canDriveFan ? "#0f766e" : "#444"}
-              stroke="#99f6e4"
-              strokeWidth="2"
-              style={{ cursor: canDriveFan ? "grab" : "default", touchAction: "none" }}
-              onPointerDown={(e) => {
-                if (!canDriveFan) return;
-                e.stopPropagation();
-                dragIx.current = i;
-                (e.currentTarget as SVGCircleElement).setPointerCapture(e.pointerId);
-              }}
-              onPointerMove={onPointerMove}
-              onPointerUp={endDrag}
-              onPointerCancel={endDrag}
-            />
-          ))}
-        </svg>
+        <div className="fan-curve-modal__chart">
+          <svg ref={svgRef} className="fan-curve-modal__svg" viewBox={`0 0 ${VB_W} ${VB_H}`}>
+            <defs>
+              <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stopColor="rgba(232, 17, 35, 0.32)" />
+                <stop offset="100%" stopColor="rgba(232, 17, 35, 0.02)" />
+              </linearGradient>
+              <pattern id={`${gradId}-grid`} width="40" height="28" patternUnits="userSpaceOnUse">
+                <path d="M 40 0 L 0 0 0 28" fill="none" stroke="rgba(255,255,255,0.05)" strokeWidth="1" />
+              </pattern>
+            </defs>
+            <rect x={PAD_L} y={PAD_T} width={PLOT_W} height={PLOT_H} fill="#0a0a0c" stroke="rgba(255,255,255,0.12)" />
+            <rect x={PAD_L} y={PAD_T} width={PLOT_W} height={PLOT_H} fill={`url(#${gradId}-grid)`} />
+            {[25, 50, 75].map((pct) => (
+              <line
+                key={pct}
+                x1={PAD_L}
+                y1={pctToY(pct)}
+                x2={PAD_L + PLOT_W}
+                y2={pctToY(pct)}
+                stroke="rgba(255,255,255,0.06)"
+                strokeDasharray="3 4"
+              />
+            ))}
+            <text x={PAD_L - 8} y={PAD_T + 4} fill="#8b8b93" fontSize="9" textAnchor="end">
+              100%
+            </text>
+            <text x={PAD_L - 8} y={PAD_T + PLOT_H} fill="#8b8b93" fontSize="9" textAnchor="end">
+              0%
+            </text>
+            <text x={PAD_L} y={PAD_T + PLOT_H + 22} fill="#8b8b93" fontSize="9">
+              {T_AXIS_LO}°C
+            </text>
+            <text x={PAD_L + PLOT_W} y={PAD_T + PLOT_H + 22} fill="#8b8b93" fontSize="9" textAnchor="end">
+              {T_AXIS_HI}°C
+            </text>
+            {curvePoints.length >= 2 ? <polygon fill={`url(#${gradId})`} stroke="none" points={fillPts} /> : null}
+            {curvePoints.length >= 2 ? (
+              <polyline fill="none" stroke="#e81123" strokeWidth="2" strokeLinejoin="miter" points={linePts} />
+            ) : null}
+            {curvePoints.map((p, i) => (
+              <g key={i}>
+                <circle
+                  cx={tempToX(p.temp)}
+                  cy={pctToY(p.pct)}
+                  r={canDriveFan ? 7 : 5}
+                  fill={canDriveFan ? "#e81123" : "#444"}
+                  stroke="#fff"
+                  strokeWidth="1.5"
+                  style={{ cursor: canDriveFan ? "grab" : "default", touchAction: "none" }}
+                  onPointerDown={(e) => {
+                    if (!canDriveFan) return;
+                    e.stopPropagation();
+                    dragIx.current = i;
+                    (e.currentTarget as SVGCircleElement).setPointerCapture(e.pointerId);
+                  }}
+                  onPointerMove={onPointerMove}
+                  onPointerUp={endDrag}
+                  onPointerCancel={endDrag}
+                />
+              </g>
+            ))}
+          </svg>
+        </div>
 
-        <ul className="fan-curve-modal__legend" aria-label="Curve points">
+        <div className="fan-curve-modal__legend" role="table" aria-label="Curve points">
+          <div className="fan-curve-modal__legend-head" role="row">
+            <span role="columnheader">#</span>
+            <span role="columnheader">Temp</span>
+            <span role="columnheader">Fan</span>
+            <span role="columnheader" />
+          </div>
           {[...curvePoints]
             .map((p, i) => ({ p, i }))
             .sort((a, b) => a.p.temp - b.p.temp)
-            .map(({ p, i }) => (
-              <li key={i} className="fan-curve-modal__legend-row">
-                <span className="fan-curve-modal__legend-val">
-                  {Math.round(p.temp)} °C · {Math.round(p.pct)}%
+            .map(({ p, i }, row) => (
+              <div key={i} className="fan-curve-modal__legend-row" role="row">
+                <span className="fan-curve-modal__legend-idx" role="cell">
+                  {row + 1}
+                </span>
+                <span className="fan-curve-modal__legend-val" role="cell">
+                  {Math.round(p.temp)} °C
+                </span>
+                <span className="fan-curve-modal__legend-val" role="cell">
+                  {Math.round(p.pct)}%
                 </span>
                 <button
                   type="button"
@@ -297,29 +440,35 @@ function FanCurveModal({
                 >
                   Remove
                 </button>
-              </li>
+              </div>
             ))}
-        </ul>
+        </div>
 
         <div className="fan-curve-modal__actions">
-          <button type="button" className="linkish" disabled={!canDriveFan || curvePoints.length >= 8} onClick={() => setCurvePoints((prev) => {
-              if (prev.length >= 8) return prev;
-              const midT = Math.round((T_AXIS_LO + T_AXIS_HI) / 2);
-              const midP = Math.round(prev.reduce((s, q) => s + q.pct, 0) / prev.length);
-              return [...prev, { temp: midT, pct: clamp(midP, 5, 95) }];
-            })}
+          <button
+            type="button"
+            className="btn-outline btn-outline--sm"
+            disabled={!canDriveFan || curvePoints.length >= 8}
+            onClick={() =>
+              setCurvePoints((prev) => {
+                if (prev.length >= 8) return prev;
+                const midT = Math.round((T_AXIS_LO + T_AXIS_HI) / 2);
+                const midP = Math.round(prev.reduce((s, q) => s + q.pct, 0) / prev.length);
+                return [...prev, { temp: midT, pct: clamp(midP, 5, 95) }];
+              })
+            }
           >
             Add point
           </button>
           <div className="fan-curve-modal__actions-right">
-            <button type="button" className="linkish" onClick={onCancel}>
+            <button type="button" className="btn-outline btn-outline--sm" onClick={onCancel}>
               Cancel
             </button>
-            <button type="button" className="linkish" onClick={onDone}>
+            <button type="button" className="btn-outline btn-outline--sm" onClick={onDone}>
               Done
             </button>
             <button type="button" className="fan-curve-modal__apply" disabled={!canDriveFan} onClick={onApply}>
-              Apply to driver
+              Apply
             </button>
           </div>
         </div>
@@ -331,9 +480,18 @@ function FanCurveModal({
 type Props = {
   onToast?: (msg: string) => void;
   embedded?: boolean;
+  cpuTempC?: number | null;
+  gpuTempC?: number | null;
+  useCelsius?: boolean;
 };
 
-export function FanControlSection({ onToast, embedded }: Props) {
+export function FanControlSection({
+  onToast,
+  embedded,
+  cpuTempC = null,
+  gpuTempC = null,
+  useCelsius = true,
+}: Props) {
   const { status } = useDriver();
   const api = typeof window !== "undefined" ? window.omenDriver : undefined;
   const sysfsRead = api?.sysfsRead;
@@ -346,14 +504,8 @@ export function FanControlSection({ onToast, embedded }: Props) {
   const [cpuRpm, setCpuRpm] = useState("—");
   const [gpuRpm, setGpuRpm] = useState("—");
   const [maxFan, setMaxFan] = useState(false);
-  const [thermalRead, setThermalRead] = useState("");
-  const [lastAppliedThermalPreset, setLastAppliedThermalPreset] = useState<ThermalPreset | null>(null);
   const [curveEnable, setCurveEnable] = useState(false);
   const [curvePoints, setCurvePoints] = useState<CurvePoint[]>(() => [...DEFAULT_CURVE]);
-  const [zoneState, setZoneState] = useState<{ mode: "auto" | "preset" | "custom"; preset?: string; custom: string }>({
-    mode: "auto",
-    custom: "",
-  });
   const [curveModalOpen, setCurveModalOpen] = useState(false);
   const curveSnapRef = useRef<CurvePoint[] | null>(null);
   const modalTitleId = useId();
@@ -403,27 +555,18 @@ export function FanControlSection({ onToast, embedded }: Props) {
     await pullRpmsOnly();
     const mf = await r("max_fan");
     if (mf !== null) setMaxFan(mf === "1");
-    const tp = await r("thermal_profile");
-    if (tp !== null) {
-      setThermalRead(tp);
-      if (isThermalPresetString(tp)) setLastAppliedThermalPreset(null);
-    }
     const ce = await r("fan_curve_enable");
     if (ce !== null) setCurveEnable(ce === "1");
     const fc = await r("fan_curve");
     if (fc != null) setCurvePoints(parseCurveStringToPoints(fc));
-    const fz = await r("fan_temp_zone");
-    if (fz != null) {
-      const n = normalizeZoneFromDriver(fz);
-      if (n.mode === "auto") setZoneState({ mode: "auto", custom: "" });
-      else if (n.mode === "preset" && n.preset) setZoneState({ mode: "preset", preset: n.preset, custom: "" });
-      else setZoneState({ mode: "custom", custom: n.custom ?? "" });
-    }
   }, [sysfsRead, fanReady, pullRpmsOnly]);
 
   useEffect(() => {
     if (!fanReady || !sysfsRead) return;
     void pullFull();
+    const onChange = () => void pullFull();
+    window.addEventListener(FAN_CHANGED, onChange);
+    return () => window.removeEventListener(FAN_CHANGED, onChange);
   }, [fanReady, sysfsRead, pullFull]);
 
   useEffect(() => {
@@ -435,7 +578,7 @@ export function FanControlSection({ onToast, embedded }: Props) {
   const writeFan = useCallback(
     async (name: string, value: string, okMsg?: string): Promise<boolean> => {
       if (!sysfsWrite) {
-        toast("Driver API unavailable.");
+        toast("Fans aren't available right now.");
         return false;
       }
       try {
@@ -443,20 +586,15 @@ export function FanControlSection({ onToast, embedded }: Props) {
         if (res && res.ok === true) {
           if (name === "max_fan") setMaxFan(value === "1");
           if (name === "fan_curve_enable") setCurveEnable(value === "1");
-          if (name === "thermal_profile") {
-            const v = value.trim();
-            if (isThermalPresetString(v)) setLastAppliedThermalPreset(v);
-          }
           if (okMsg) toast(okMsg);
+          notifyFanChanged();
           void pullFull();
           return true;
         } else {
           const err = res && typeof res.error === "string" ? res.error : "Write failed";
           const low = err.toLowerCase();
           if (low.includes("eacces") || low.includes("eperm") || low.includes("permission denied")) {
-            toast(
-              "Permission denied on fan sysfs. Install the driver udev rules (they chmod g+w on fan/*), then: sudo udevadm control --reload-rules && sudo udevadm trigger — or chmod the fan files for group input.",
-            );
+            toast("Can't change the fans from this account.");
           } else {
             toast(err);
           }
@@ -470,28 +608,21 @@ export function FanControlSection({ onToast, embedded }: Props) {
     [sysfsWrite, toast, pullFull],
   );
 
-  const ensureCurveWorkerForThermalWrites = useCallback(async () => {
-    if (curveEnable) return true;
-    return writeFan("fan_curve_enable", "1");
-  }, [curveEnable, writeFan]);
-
-  const onSetProfile = (p: ThermalPreset) => {
-    void (async () => {
-      if (!(await ensureCurveWorkerForThermalWrites())) return;
-      void writeFan("thermal_profile", p, `Thermal profile: ${p}`);
-    })();
-  };
-
   const onToggleMaxFan = () => {
-    void (async () => {
-      const turningOn = !maxFan;
-      if (turningOn && !(await ensureCurveWorkerForThermalWrites())) return;
-      void writeFan("max_fan", turningOn ? "1" : "0", turningOn ? "Max fan: on" : "Max fan: off");
-    })();
+    const turningOn = !maxFan;
+    void writeFan("max_fan", turningOn ? "1" : "0", turningOn ? "Boost fans on" : "Boost fans off");
   };
 
   const onToggleCurve = () => {
-    void writeFan("fan_curve_enable", curveEnable ? "0" : "1", curveEnable ? "Fan curve: off" : "Fan curve: on");
+    void writeFan(
+      "fan_curve_enable",
+      curveEnable ? "0" : "1",
+      curveEnable ? "Back to automatic fans" : "Custom fan speed on",
+    );
+  };
+
+  const onRestoreEc = () => {
+    void writeFan("fan_curve", "default", "Fans set to automatic");
   };
 
   const onApplyCurve = useCallback(() => {
@@ -501,23 +632,10 @@ export function FanControlSection({ onToast, embedded }: Props) {
       toast(parsed.error);
       return;
     }
-    void writeFan("fan_curve", body, "Fan curve updated");
+    void writeFan("fan_curve", body, "Fan curve saved");
     curveSnapRef.current = null;
     setCurveModalOpen(false);
   }, [curvePoints, toast, writeFan]);
-
-  const onSelectZonePreset = (z: string) => {
-    void writeFan("fan_temp_zone", z, `Thermal zone: ${z}`);
-  };
-
-  const onApplyCustomZone = () => {
-    const z = zoneState.custom.trim();
-    if (!z) {
-      toast("Enter a thermal zone name (e.g. from /sys/class/thermal/thermal_zone*/type).");
-      return;
-    }
-    void writeFan("fan_temp_zone", z, "Thermal zone set");
-  };
 
   if (embedded && (!status?.supported || !fanReady)) {
     return null;
@@ -527,9 +645,9 @@ export function FanControlSection({ onToast, embedded }: Props) {
     return (
       <div className="uv-panel fan-driver-fallback">
         <h3 className="panel-head__title" style={{ marginBottom: 8 }}>
-          OMEN driver fans
+          Fans
         </h3>
-        <p className="muted">Fan sysfs is available on Linux with the omen-rgb-keyboard driver.</p>
+        <p className="muted">Fan controls show up on a supported OMEN laptop.</p>
       </div>
     );
   }
@@ -538,31 +656,19 @@ export function FanControlSection({ onToast, embedded }: Props) {
     return (
       <div className="uv-panel fan-driver-fallback">
         <h3 className="panel-head__title" style={{ marginBottom: 8 }}>
-          OMEN driver fans
+          Fans
         </h3>
-        <p className="muted">
-          No fan sysfs at <code className="fan-ctrl-card__code">/sys/devices/platform/omen-rgb-keyboard/fan/</code>. Use a
-          driver/kernel build that exposes fan files, with <code className="fan-ctrl-card__code">CONFIG_THERMAL</code> for
-          the temperature zone.
-        </p>
+        <p className="muted">Fan controls aren't available on this computer.</p>
       </div>
     );
   }
-
-  const presetForHighlight: ThermalPreset | null = isThermalPresetString(thermalRead)
-    ? thermalRead
-    : lastAppliedThermalPreset;
-  const profileActive = (p: ThermalPreset) => presetForHighlight === p;
-
-  const cpuRpmDisp = rpmLine(cpuRpm);
-  const gpuRpmDisp = rpmLine(gpuRpm);
 
   const driverBody = (
     <>
       {!embedded ? (
         <div className="panel-head panel-head--spaced">
           <h2 className="panel-head__title">
-            OMEN driver fans
+            Fans
             {!fanWritable ? (
               <span className="fan-driver-badge fan-driver-badge--ro">read-only</span>
             ) : (
@@ -573,136 +679,64 @@ export function FanControlSection({ onToast, embedded }: Props) {
       ) : null}
 
       <div className={embedded ? "thermal-block__driver" : "thermal-block thermal-block--driver"} data-thermal="auto">
-        {!embedded ? (
-          <p className="fan-driver-lead muted">
-            Sysfs <code className="fan-ctrl-card__code">omen-rgb-keyboard/fan</code>. Presets and Max enable the curve
-            worker first when required; use the switch to turn it off.
-          </p>
-        ) : null}
         {fanReady && !fanWritable ? (
-          <p className="fan-ctrl-card__hint fan-ctrl-card__hint--warn">
-            Fan files need group write (udev <code className="fan-ctrl-card__code">chmod g+w</code> on fan/*). Then{" "}
-            <code className="fan-ctrl-card__code">sudo udevadm control --reload-rules {'&&'} sudo udevadm trigger</code>.
-          </p>
+          <p className="fan-ctrl-card__hint fan-ctrl-card__hint--warn">Fans can be viewed, but this user can't change them yet.</p>
         ) : null}
 
-        <div className="fan-readout fan-readout--driver">
-          <div>
-            <div className="fan-readout__rpm">{cpuRpmDisp}</div>
-            <div className="fan-readout__lbl">CPU</div>
-          </div>
-          <div>
-            <div className="fan-readout__rpm">{gpuRpmDisp}</div>
-            <div className="fan-readout__lbl">GPU</div>
-          </div>
-        </div>
+        <ChassisUnderside
+          cpuRaw={cpuRpm}
+          gpuRaw={gpuRpm}
+          maxFan={maxFan}
+          cpuTempC={cpuTempC}
+          gpuTempC={gpuTempC}
+          useCelsius={useCelsius}
+        />
 
-        <div className="seg-3 seg-3--thermal seg-3--thermal-4" role="group" aria-label="Fan boost and thermal mode">
-          <button
-            type="button"
-            className={maxFan ? "is-on is-on--fanmax" : ""}
-            disabled={!canDriveFan}
-            title="Full fan speed (sysfs max_fan)"
-            onClick={() => onToggleMaxFan()}
-          >
-            Max
-          </button>
-          {THERMAL_PRESETS.map((p) => (
+        <div className="fan-easy-list">
+          <div className="fan-easy-row">
+            <div className="fan-easy-copy">
+              <span className="fan-easy-title">Boost fans</span>
+              <span className="fan-easy-sub">Keep both fans at full speed</span>
+            </div>
             <button
-              key={p}
               type="button"
-              className={profileActive(p) ? `is-on is-on--${PROFILE_THERMAL[p]}` : ""}
+              className="switch"
+              aria-pressed={maxFan}
+              aria-label="Boost fans"
               disabled={!canDriveFan}
-              onClick={() => onSetProfile(p)}
+              onClick={() => onToggleMaxFan()}
             >
-              {p.charAt(0).toUpperCase() + p.slice(1)}
-            </button>
-          ))}
-        </div>
-        {isDriverEcUnmapped(thermalRead) ? (
-          <p className="muted fan-ec-note fan-ec-note--compact">EC profile read not mapped; presets still apply.</p>
-        ) : isDriverEcReadError(thermalRead) ? (
-          <p className="fan-ctrl-card__ec fan-ec-note--compact">
-            EC: <code className="fan-ctrl-card__code">{thermalRead}</code>
-          </p>
-        ) : thermalRead && !isThermalPresetString(thermalRead) ? (
-          <p className="fan-ctrl-card__ec fan-ec-note--compact">
-            EC: <code className="fan-ctrl-card__code">{thermalRead}</code>
-          </p>
-        ) : null}
-
-        <div className="perf-subhead">{embedded ? "Zone" : "Thermal zone"}</div>
-        {!embedded ? (
-          <p className="fan-zone-lead muted">Linux thermal zone type for the curve, or Auto.</p>
-        ) : null}
-        <div className="fan-zone-chips" role="group" aria-label="Thermal zone">
-          <button
-            type="button"
-            className={`fan-zone-chip${zoneState.mode === "auto" ? " is-active" : ""}`}
-            disabled={!canDriveFan || zoneState.mode === "auto"}
-            title="Driver default zone selection when sysfs shows auto."
-            onClick={() => toast("To use driver defaults again, reload the module; empty zone write is not supported.")}
-          >
-            Auto
-          </button>
-          {COMMON_THERMAL_ZONES.map((z) => (
-            <button
-              key={z}
-              type="button"
-              className={`fan-zone-chip${zoneState.mode === "preset" && zoneState.preset === z ? " is-active" : ""}`}
-              disabled={!canDriveFan}
-              onClick={() => onSelectZonePreset(z)}
-            >
-              {z.replace(/_/g, " ")}
-            </button>
-          ))}
-          <button
-            type="button"
-            className={`fan-zone-chip${zoneState.mode === "custom" ? " is-active" : ""}`}
-            disabled={!canDriveFan}
-            onClick={() => setZoneState((s) => ({ ...s, mode: "custom" }))}
-          >
-            Custom…
-          </button>
-        </div>
-        {zoneState.mode === "custom" ? (
-          <div className="fan-zone-custom">
-            <input
-              type="text"
-              className="fan-curve-num fan-zone-custom__input"
-              value={zoneState.custom}
-              onChange={(e) => setZoneState((s) => ({ ...s, mode: "custom", custom: e.target.value }))}
-              disabled={!canDriveFan}
-              placeholder="thermal_zone type string"
-              spellCheck={false}
-            />
-            <button type="button" className="linkish" disabled={!canDriveFan} onClick={() => onApplyCustomZone()}>
-              Apply zone
+              <span className="switch__knob" />
             </button>
           </div>
-        ) : null}
 
-        <div className="fan-curve-worker-row">
-          <span className="fan-curve-worker-label">Curve</span>
-          <button
-            type="button"
-            className="switch"
-            aria-pressed={curveEnable}
-            aria-label="Fan curve worker"
-            disabled={!canDriveFan}
-            onClick={() => onToggleCurve()}
-          >
-            <span className="switch__knob" />
-          </button>
-        </div>
+          <div className="fan-easy-row">
+            <div className="fan-easy-copy">
+              <span className="fan-easy-title">Custom fan speed</span>
+              <span className="fan-easy-sub">Use your own temperature curve</span>
+            </div>
+            <button
+              type="button"
+              className="switch"
+              aria-pressed={curveEnable}
+              aria-label="Custom fan speed"
+              disabled={!canDriveFan}
+              onClick={() => onToggleCurve()}
+            >
+              <span className="switch__knob" />
+            </button>
+          </div>
 
-        <div className="fan-curve-inline">
-          <p className="fan-curve-inline__summary muted" title={curveSummary(curvePoints)}>
-            {curvePoints.length} steps: {curveSummary(curvePoints)}
-          </p>
-          <button type="button" className="fan-curve-inline__open" disabled={!canDriveFan} onClick={openCurveModal}>
-            Edit curve graph…
-          </button>
+          {curveEnable ? (
+            <div className="fan-curve-inline">
+              <button type="button" className="fan-curve-inline__open" disabled={!canDriveFan} onClick={openCurveModal}>
+                Edit curve
+              </button>
+              <button type="button" className="linkish" disabled={!canDriveFan} onClick={onRestoreEc}>
+                Reset to automatic
+              </button>
+            </div>
+          ) : null}
         </div>
       </div>
 

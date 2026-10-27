@@ -4,6 +4,8 @@ const os = require("os");
 const path = require("path");
 const { spawn, spawnSync } = require("child_process");
 const driver = require("./driver");
+const optimus = require("./optimus");
+const { setupAutoUpdater } = require("./updater");
 const { getMachineModelLabel } = require("./machineModel");
 const { getSystemMetrics } = require("./systemMetrics");
 
@@ -53,12 +55,13 @@ function launchInstallHelperTerminal() {
 const isDev = process.env.NODE_ENV === "development";
 
 let mainWindow;
+let updaterApi = null;
 
 function createWindow() {
   nativeTheme.themeSource = "dark";
 
   mainWindow = new BrowserWindow({
-    title: "OMEN Gaming Hub",
+    title: "OmenLinux",
     width: 1280,
     height: 800,
     minWidth: 1024,
@@ -186,7 +189,46 @@ ipcMain.handle("driver-install-one-click", () => {
   };
 });
 
-app.whenReady().then(createWindow);
+ipcMain.handle("optimus-get-status", () => optimus.getOptimusStatus());
+
+ipcMain.handle("optimus-switch", (_e, mode) => {
+  if (typeof mode !== "string") return { ok: false, error: "Bad mode" };
+  return optimus.switchOptimusMode(mode, { noConfirm: true });
+});
+
+ipcMain.handle("optimus-install", () => optimus.installOptimusManager());
+
+ipcMain.handle("optimus-enable-service", () => optimus.enableOptimusService());
+
+ipcMain.handle("optimus-fix-setup", () => optimus.fixOptimusSetup());
+
+ipcMain.handle("optimus-fix-gdm-prime", () => optimus.fixGdmPrime());
+
+ipcMain.handle("optimus-repair-state", () => optimus.repairOptimusState());
+
+ipcMain.handle("app-get-version", () => app.getVersion());
+
+ipcMain.handle("updater-check", async () => {
+  if (!updaterApi) return { ok: false, reason: "unavailable" };
+  return updaterApi.check();
+});
+
+ipcMain.handle("updater-install", () => {
+  if (!updaterApi) return { ok: false, reason: "unavailable" };
+  return updaterApi.install();
+});
+
+app.whenReady().then(() => {
+  createWindow();
+  updaterApi = setupAutoUpdater({
+    isDev,
+    send: (payload) => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send("updater-event", payload);
+      }
+    },
+  });
+});
 
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") {

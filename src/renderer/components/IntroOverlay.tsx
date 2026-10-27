@@ -1,13 +1,14 @@
 import { useEffect, useRef, useState } from "react";
+import { useAppVersion } from "../hooks/useAppVersion";
 import { OmenBrandLogo } from "./OmenBrandLogo";
-import { APP_VERSION } from "../version";
 
-const HOLD_MS = 1780;
-const FADE_MS = 420;
+const HOLD_MS = 1600;
+const FADE_MS = 380;
 
 type Props = { onComplete: () => void };
 
 export function IntroOverlay({ onComplete }: Props) {
+  const appVersion = useAppVersion();
   const [exiting, setExiting] = useState(false);
   const doneRef = useRef(false);
   const onCompleteRef = useRef(onComplete);
@@ -84,26 +85,16 @@ export function IntroOverlay({ onComplete }: Props) {
       }}
       tabIndex={-1}
     >
-      <div className="intro-screen__bg" aria-hidden>
-        <div className="intro-screen__bg-grid" />
-        <div className="intro-screen__bg-glow intro-screen__bg-glow--a" />
-        <div className="intro-screen__bg-glow intro-screen__bg-glow--b" />
-        <div className="intro-screen__bg-glow intro-screen__bg-glow--c" />
-        <div className="intro-screen__bg-sweep" />
-      </div>
+      <div className="intro-screen__bg" aria-hidden />
       <div className="intro-screen__inner">
-        <div className="intro-screen__mark">
-          <div className="intro-screen__mark-enter">
-            <div className="intro-screen__mark-pulse">
-              <OmenBrandLogo className="omen-brand-logo intro-screen__logo" height={76} />
-            </div>
-          </div>
+        <OmenBrandLogo className="omen-brand-logo intro-screen__logo" height={52} />
+        <div className="intro-screen__copy">
+          <h1 className="intro-screen__title">
+            OMEN <span className="intro-screen__title-accent">Control</span>
+          </h1>
+          <p className="intro-screen__tag">Linux control for OMEN hardware</p>
         </div>
-        <h1 className="intro-screen__title">
-          <span className="intro-screen__omen">OMEN</span>
-          <span className="intro-screen__hub">Gaming Hub</span>
-        </h1>
-        <p className="intro-screen__version">Version {APP_VERSION}</p>
+        <p className="intro-screen__version">v{appVersion}</p>
       </div>
     </div>
   );
