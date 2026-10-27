@@ -5,6 +5,9 @@ const { autoUpdater } = require("electron-updater");
  * GitHub Releases auto-update.
  * Works for packaged AppImage (Linux) and NSIS (Windows).
  * Skipped in Vite/dev and unpackaged runs.
+ *
+ * CI publishes every main commit as semver 1.0.<commitCount> so each
+ * push is a real upgrade (unlike +sha build metadata, which updaters ignore).
  */
 function setupAutoUpdater({ isDev, send }) {
   const stub = (reason) => ({
